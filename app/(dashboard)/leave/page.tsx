@@ -167,6 +167,16 @@ export default function LeavePage() {
 
   const handleAction = async (id: string, status: 'APPROVED' | 'REJECTED') => {
     setApproving(id);
+    const req = requests.find((r) => r.id === id);
+    if (req && req.employee_id === currentUser?.id) {
+      setApproving(null);
+      toast.error('You cannot approve or reject your own leave request');
+      return;
+    }
+    if (!req) {
+      setApproving(null);
+      return;
+    }
     try {
       let approverId: string | null = null;
       if (currentUser) {
@@ -184,26 +194,23 @@ export default function LeavePage() {
       if (error) throw error;
       toast.success(`Leave ${status.toLowerCase()}`);
 
-      const req = requests.find((r) => r.id === id);
-      if (req) {
-        const emp = employees.find((e) => e.id === req.employee_id);
-        const lt = leaveTypes.find((l) => l.id === req.leave_type_id);
-        if (emp) {
-          await enqueueAndProcess({
-            eventKey: status === 'APPROVED' ? 'leave.approved' : 'leave.rejected',
-            recipientEmail: emp.email,
-            recipientName: `${emp.first_name} ${emp.last_name}`,
-            subject: `Your leave request has been ${status.toLowerCase()}`,
-            bodyHtml: `<p>Hi ${emp.first_name},</p><p>Your ${lt?.name || 'leave'} request from ${req.start_date} to ${req.end_date} has been <strong>${status.toLowerCase()}</strong>.</p>`,
-            metadata: {
-              employee_name: `${emp.first_name} ${emp.last_name}`,
-              leave_type: lt?.name || '',
-              start_date: req.start_date,
-              end_date: req.end_date,
-              status,
-            },
-          });
-        }
+      const emp = employees.find((e) => e.id === req.employee_id);
+      const lt = leaveTypes.find((l) => l.id === req.leave_type_id);
+      if (emp) {
+        await enqueueAndProcess({
+          eventKey: status === 'APPROVED' ? 'leave.approved' : 'leave.rejected',
+          recipientEmail: emp.email,
+          recipientName: `${emp.first_name} ${emp.last_name}`,
+          subject: `Your leave request has been ${status.toLowerCase()}`,
+          bodyHtml: `<p>Hi ${emp.first_name},</p><p>Your ${lt?.name || 'leave'} request from ${req.start_date} to ${req.end_date} has been <strong>${status.toLowerCase()}</strong>.</p>`,
+          metadata: {
+            employee_name: `${emp.first_name} ${emp.last_name}`,
+            leave_type: lt?.name || '',
+            start_date: req.start_date,
+            end_date: req.end_date,
+            status,
+          },
+        });
       }
       load();
     } catch (err) {
@@ -316,7 +323,7 @@ export default function LeavePage() {
           </Button>
         }
         rowActions={(r) => (
-          r.status === 'PENDING' ? (
+          r.status === 'PENDING' && r.employee_id !== currentUser?.id ? (
             <div className="flex gap-1">
               <Button size="sm" variant="outline" className="h-7 text-success" disabled={approving === r.id} onClick={() => handleAction(r.id, 'APPROVED')}>
                 {approving === r.id ? '...' : 'Approve'}

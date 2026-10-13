@@ -8247,6 +8247,1728 @@ CREATE POLICY "update_employee_qualifications" ON employee_qualifications FOR UP
   WITH CHECK (employee_id = public.current_employee_id() OR public.has_privilege('employees.manage'));
 
 -- ===========================================================================
+-- 20261009000001_html_mail_templates.sql
+-- ===========================================================================
+
+/*
+# HTML mail templates (branded, logo-aware)
+
+Adds four ready-to-use, email-safe HTML templates to `mail_templates`:
+
+  1. welcome.new_employee     - new employee onboarding & welcome
+  2. password.reset           - password reset link
+  3. general.notification     - general event notifications
+  4. performance.appraisal    - performance appraisal email
+
+Every template shares the same branded shell: the company logo and name in the
+header, a primary-colored accent bar, and a footer naming the app/company.
+
+Merge tags (interpolated by /api/mail/send and the send-mail edge function):
+  Always available from system_settings:
+    {{company_name}}      system_settings.company.company_name
+    {{company_logo_url}}  system_settings.company.company_logo_url
+                          (falls back to branding.logo_url)
+    {{app_name}}          system_settings.branding.app_name
+  Per-event (supplied by the caller in notification_queue.metadata):
+    welcome.new_employee     first_name, employee_name, employee_email, setup_link
+    password.reset           first_name, employee_name, employee_email, reset_link
+    general.notification     employee_name, title, message, action_label, action_url
+    performance.appraisal    first_name, review_period, reviewer_name, due_date, action_url
+
+Idempotent: re-running refreshes the four templates (ON CONFLICT DO UPDATE).
+*/
+
+DO $mig$
+DECLARE
+  v_head text := $head$<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>{{company_name}}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#eef2f7;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;background-color:#eef2f7;">
+<tr><td align="center" style="padding:28px 12px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background-color:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e2e8f0;">
+<tr><td align="center" style="padding:30px 32px 22px;background-color:#ffffff;">
+<img src="{{company_logo_url}}" alt="{{company_name}}" height="46" style="display:block;height:46px;max-height:46px;border:0;outline:none;">
+<div style="margin-top:12px;font-size:12px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#64748b;">{{company_name}}</div>
+</td></tr>
+<tr><td style="height:4px;line-height:4px;font-size:0;background-color:#2563eb;">&nbsp;</td></tr>
+<tr><td style="padding:34px 36px 30px;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">$head$;
+
+  v_foot text := $foot$</td></tr>
+<tr><td style="padding:22px 36px;background-color:#f8fafc;border-top:1px solid #e2e8f0;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;text-align:center;">
+<p style="margin:0;font-size:12px;line-height:1.6;color:#94a3b8;">This is an automated message from {{app_name}} on behalf of {{company_name}}.</p>
+<p style="margin:6px 0 0;font-size:12px;line-height:1.6;color:#94a3b8;">Please do not reply directly to this email.</p>
+</td></tr>
+</table>
+<p style="margin:14px 0 0;font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:11px;color:#94a3b8;">&copy; {{company_name}}. All rights reserved.</p>
+</td></tr>
+</table>
+</body>
+</html>$foot$;
+
+  v_welcome text := $w$<h1 style="margin:0 0 10px;font-size:23px;line-height:1.3;font-weight:700;color:#0f172a;">Welcome aboard, {{first_name}}!</h1>
+<p style="margin:0 0 18px;font-size:15px;line-height:1.65;color:#334155;">We are delighted to have you join {{company_name}}. Your employee account has been created for <strong>{{employee_email}}</strong>. Set a password to unlock your onboarding checklist and self-service portal.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px;"><tr><td style="border-radius:9px;background-color:#2563eb;">
+<a href="{{setup_link}}" style="display:inline-block;padding:14px 28px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:9px;">Set Up My Account</a>
+</td></tr></table>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;">
+<tr><td style="padding:18px 20px;">
+<p style="margin:0 0 8px;font-size:13px;font-weight:700;color:#0f172a;">Your onboarding checklist</p>
+<table role="presentation" cellpadding="0" cellspacing="0">
+<tr><td style="padding:3px 0;font-size:14px;line-height:1.5;color:#334155;">&#8226;&nbsp; Set your password with the button above</td></tr>
+<tr><td style="padding:3px 0;font-size:14px;line-height:1.5;color:#334155;">&#8226;&nbsp; Complete your personal &amp; employment details</td></tr>
+<tr><td style="padding:3px 0;font-size:14px;line-height:1.5;color:#334155;">&#8226;&nbsp; Upload your documents and certifications</td></tr>
+<tr><td style="padding:3px 0;font-size:14px;line-height:1.5;color:#334155;">&#8226;&nbsp; Submit your guarantor and medical information</td></tr>
+</table>
+</td></tr></table>
+<p style="margin:18px 0 0;font-size:13px;line-height:1.6;color:#64748b;">If the button does not work, copy and paste this link into your browser:<br><a href="{{setup_link}}" style="color:#2563eb;word-break:break-all;">{{setup_link}}</a></p>$w$;
+
+  v_reset text := $r$<h1 style="margin:0 0 10px;font-size:23px;line-height:1.3;font-weight:700;color:#0f172a;">Reset your password</h1>
+<p style="margin:0 0 18px;font-size:15px;line-height:1.65;color:#334155;">Hi {{first_name}}, we received a request to reset the password for your {{app_name}} account (<strong>{{employee_email}}</strong>). Click the button below to choose a new password.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px;"><tr><td style="border-radius:9px;background-color:#2563eb;">
+<a href="{{reset_link}}" style="display:inline-block;padding:14px 28px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:9px;">Reset Password</a>
+</td></tr></table>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;background-color:#fff7ed;border:1px solid #fed7aa;border-radius:10px;">
+<tr><td style="padding:14px 18px;font-size:13px;line-height:1.6;color:#9a3412;">
+<strong>Security notice:</strong> this link expires shortly and can be used only once. If you did not request a password reset, you can safely ignore this email and your current password will remain unchanged.
+</td></tr></table>
+<p style="margin:18px 0 0;font-size:13px;line-height:1.6;color:#64748b;">If the button does not work, copy and paste this link into your browser:<br><a href="{{reset_link}}" style="color:#2563eb;word-break:break-all;">{{reset_link}}</a></p>$r$;
+
+  v_general text := $g$<h1 style="margin:0 0 10px;font-size:23px;line-height:1.3;font-weight:700;color:#0f172a;">{{title}}</h1>
+<p style="margin:0 0 14px;font-size:15px;line-height:1.65;color:#334155;">Hello {{employee_name}},</p>
+<p style="margin:0 0 22px;font-size:15px;line-height:1.65;color:#334155;">{{message}}</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;"><tr><td style="border-radius:9px;background-color:#2563eb;">
+<a href="{{action_url}}" style="display:inline-block;padding:14px 28px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:9px;">{{action_label}}</a>
+</td></tr></table>$g$;
+
+  v_performance text := $p$<h1 style="margin:0 0 10px;font-size:23px;line-height:1.3;font-weight:700;color:#0f172a;">Your performance appraisal is ready</h1>
+<p style="margin:0 0 18px;font-size:15px;line-height:1.65;color:#334155;">Hi {{first_name}}, your performance appraisal for <strong>{{review_period}}</strong> has been published. Review your ratings, achievements and development goals, and add your self-assessment comments.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #e2e8f0;border-radius:10px;margin:0 0 22px;">
+<tr><td style="padding:14px 18px;font-size:14px;line-height:1.6;color:#334155;border-bottom:1px solid #e2e8f0;"><span style="color:#64748b;">Review period:</span> <strong style="color:#0f172a;">{{review_period}}</strong></td></tr>
+<tr><td style="padding:14px 18px;font-size:14px;line-height:1.6;color:#334155;border-bottom:1px solid #e2e8f0;"><span style="color:#64748b;">Reviewer:</span> <strong style="color:#0f172a;">{{reviewer_name}}</strong></td></tr>
+<tr><td style="padding:14px 18px;font-size:14px;line-height:1.6;color:#334155;"><span style="color:#64748b;">Complete your response by:</span> <strong style="color:#0f172a;">{{due_date}}</strong></td></tr>
+</table>
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;"><tr><td style="border-radius:9px;background-color:#2563eb;">
+<a href="{{action_url}}" style="display:inline-block;padding:14px 28px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:9px;">View My Appraisal</a>
+</td></tr></table>$p$;
+BEGIN
+  INSERT INTO public.mail_templates (event_key, subject, body_html, variables, is_active)
+  VALUES
+    (
+      'welcome.new_employee',
+      $s1$Welcome to {{company_name}}, {{first_name}}!$s1$,
+      v_head || v_welcome || v_foot,
+      $v1$["first_name","employee_name","employee_email","setup_link","company_name","company_logo_url","app_name"]$v1$::jsonb,
+      true
+    ),
+    (
+      'password.reset',
+      $s2$Reset your {{app_name}} password$s2$,
+      v_head || v_reset || v_foot,
+      $v2$["first_name","employee_name","employee_email","reset_link","company_name","company_logo_url","app_name"]$v2$::jsonb,
+      true
+    ),
+    (
+      'general.notification',
+      $s3${{title}}$s3$,
+      v_head || v_general || v_foot,
+      $v3$["employee_name","title","message","action_label","action_url","company_name","company_logo_url","app_name"]$v3$::jsonb,
+      true
+    ),
+    (
+      'performance.appraisal',
+      $s4$Your {{review_period}} performance appraisal$s4$,
+      v_head || v_performance || v_foot,
+      $v4$["first_name","review_period","reviewer_name","due_date","action_url","company_name","company_logo_url","app_name"]$v4$::jsonb,
+      true
+    )
+  ON CONFLICT (event_key) DO UPDATE
+    SET subject = EXCLUDED.subject,
+        body_html = EXCLUDED.body_html,
+        variables = EXCLUDED.variables,
+        is_active = true,
+        updated_at = now();
+END;
+$mig$;
+
+-- ===========================================================================
+-- 20261012000001_employee_lifecycle_features.sql
+-- ===========================================================================
+
+-- ===========================================================================
+-- HR Employee Lifecycle — Feature Set (2026-10-12)
+--
+-- Implements the 7 requested life-cycle features:
+--
+-- 1. Onboarding gate (already client-enforced in AppShell / route-guards).
+-- 2. Profile lock: once an employee is ACTIVE they can no longer edit their
+--    own profile directly. They submit *change requests* that HR reviews and
+--    applies. Enforced in RLS (`update_employees`) + a BEFORE trigger on the
+--    per-employee sub-record tables.
+-- 3. Approved workflow records become immutable; a MANAGER (or HR_ADMIN /
+--    SUPER_ADMIN / admin.settings holder) can submit an *appeal* which reopens
+--    the same workflow instance for a fresh approval round (status -> PENDING,
+--    docked to the first step). Only the workflow-propagation writer
+--    (apply_workflow_result_to_record) and SUPER_ADMIN bypass the lock.
+-- 4. (UI) HR "Add employee" wizard reusing the employee-detail steps.
+-- 5. `reset_employee_password(employee_id)` — admin RPC that clears the
+--    employee's password (old password invalid), issues a fresh setup token and
+--    returns the raw token so the UI can send the `password.reset` email with a
+--    /setup-account?token=... link. Reuses the existing setup-token flow.
+-- 6. `employment_status = 'DISABLED'`: Disabling blocks login (is_login_blocked
+--    true) and stores the previous status so re-enabling restores it. Payroll
+--    generation / preview exclude DISABLED employees.
+-- 7. (UI) Email-template preview.
+--
+-- Safe to re-run: all DDL is IF NOT EXISTS / CREATE OR REPLACE / DROP POLICY IF
+-- EXISTS. No production data is renamed or deleted.
+-- ===========================================================================
+
+-- ===========================================================================
+-- 6. DISABLED employment status
+-- ===========================================================================
+ALTER TABLE employees
+  ADD COLUMN IF NOT EXISTS disabled_reason text,
+  ADD COLUMN IF NOT EXISTS employment_status_before_disable text;
+
+-- Extend the existing disable/enable RPC so it also toggles the DISABLED status
+-- while preserving the previous non-departed status for restore on re-enable.
+CREATE OR REPLACE FUNCTION public.set_employee_disabled(
+  p_employee_id uuid,
+  p_disabled boolean DEFAULT true,
+  p_reason text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_status text;
+BEGIN
+  IF NOT public.has_privilege('employees.manage') THEN
+    RAISE EXCEPTION 'You do not have permission to disable employees';
+  END IF;
+
+  SELECT employment_status INTO v_status FROM public.employees WHERE id = p_employee_id;
+  IF v_status IS NULL THEN
+    RAISE EXCEPTION 'Employee not found';
+  END IF;
+
+  IF p_disabled THEN
+    IF v_status = 'DISABLED' THEN
+      RETURN;
+    END IF;
+    UPDATE public.employees
+       SET is_login_blocked = true,
+           employment_status_before_disable =
+             CASE WHEN v_status = ANY (ARRAY['TERMINATED', 'RESIGNED', 'EXITED', 'DISENGAGED', 'DISABLED'])
+                  THEN NULL ELSE v_status END,
+           disabled_reason = NULLIF(p_reason, ''),
+           employment_status = 'DISABLED',
+           updated_at = now()
+     WHERE id = p_employee_id;
+  ELSE
+    UPDATE public.employees
+       SET is_login_blocked = false,
+           employment_status = COALESCE(employment_status_before_disable, 'ACTIVE'),
+           employment_status_before_disable = NULL,
+           disabled_reason = NULL,
+           updated_at = now()
+     WHERE id = p_employee_id;
+  END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.set_employee_disabled(uuid, boolean, text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.set_employee_disabled(uuid, boolean, text) FROM PUBLIC;
+
+-- Block login for DISABLED employees (kept in sync with is_login_blocked).
+CREATE OR REPLACE FUNCTION public.authenticate_employee(p_email text, p_password text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_emp employees%ROWTYPE;
+  v_expiry_days int;
+BEGIN
+  IF p_email IS NULL OR p_password IS NULL OR p_password = '' THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'INVALID');
+  END IF;
+
+  SELECT * INTO v_emp
+    FROM employees e
+   WHERE lower(e.email) = lower(p_email)
+   LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'INVALID');
+  END IF;
+
+  IF v_emp.is_login_blocked OR v_emp.employment_status = 'DISABLED' THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'LOCKED');
+  END IF;
+
+  IF v_emp.password_hash IS NULL THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'NO_PASSWORD',
+                              'employee_id', v_emp.id, 'email', v_emp.email);
+  END IF;
+
+  IF NOT (v_emp.password_hash = extensions.crypt(p_password, v_emp.password_hash)) THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'INVALID');
+  END IF;
+
+  IF v_emp.user_id IS DISTINCT FROM v_emp.id THEN
+    UPDATE employees SET user_id = id WHERE id = v_emp.id;
+  END IF;
+
+  -- Enforce configurable password expiry: flag the account for a change.
+  IF NOT v_emp.must_change_password THEN
+    SELECT COALESCE(max((value #>> '{}')::int), 0)
+      INTO v_expiry_days
+      FROM system_settings
+     WHERE group_name = 'security' AND key = 'password_expiry_days';
+
+    IF v_expiry_days > 0
+       AND v_emp.password_updated_at IS NOT NULL
+       AND v_emp.password_updated_at < now() - make_interval(days => v_expiry_days) THEN
+      UPDATE employees
+         SET must_change_password = true,
+             updated_at           = now()
+       WHERE id = v_emp.id;
+      SELECT * INTO v_emp FROM employees WHERE id = v_emp.id;
+    END IF;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'employee_id', v_emp.id,
+    'email', v_emp.email,
+    'role', v_emp.role,
+    'first_name', v_emp.first_name,
+    'last_name', v_emp.last_name,
+    'employment_status', v_emp.employment_status,
+    'must_change_password', v_emp.must_change_password
+  );
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.authenticate_employee(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.authenticate_employee(text, text) TO anon, authenticated;
+
+-- Exclude DISABLED employees from payroll preview + generation.
+CREATE OR REPLACE FUNCTION public.payroll_preview(
+  p_period_start date,
+  p_period_end date,
+  p_employee_ids uuid[] DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_tax_rate numeric;
+  v_emp_id uuid;
+  v_row jsonb;
+  v_rows jsonb := '[]'::jsonb;
+BEGIN
+  IF NOT public.has_privilege('payroll.manage') THEN
+    RAISE EXCEPTION 'You do not have permission to manage payroll';
+  END IF;
+
+  IF p_period_start IS NULL OR p_period_end IS NULL OR p_period_end < p_period_start THEN
+    RAISE EXCEPTION 'Invalid pay period';
+  END IF;
+
+  v_tax_rate := COALESCE(
+    (SELECT value::numeric FROM system_settings WHERE group_name = 'payroll' AND key = 'tax_rate_pct'),
+    10
+  );
+
+  FOR v_emp_id IN
+    SELECT e.id
+      FROM employees e
+     WHERE e.employment_status NOT IN ('TERMINATED', 'RESIGNED', 'EXITED', 'DISENGAGED', 'DISABLED')
+       AND (p_employee_ids IS NULL OR e.id = ANY (p_employee_ids))
+     ORDER BY e.first_name, e.last_name
+  LOOP
+    v_row := public._payroll_calc_for(v_emp_id, p_period_start, p_period_end, v_tax_rate);
+    v_rows := v_rows || jsonb_build_array(v_row);
+  END LOOP;
+
+  RETURN v_rows;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.generate_payroll_run(
+  p_name text,
+  p_period_start date,
+  p_period_end date,
+  p_employee_ids uuid[] DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_run_id uuid;
+  v_tax_rate numeric;
+  v_emp_id uuid;
+  v_row jsonb;
+  v_tot_gross numeric := 0;
+  v_tot_deductions numeric := 0;
+  v_tot_net numeric := 0;
+  v_created_count integer := 0;
+  v_dup uuid;
+BEGIN
+  IF NOT public.has_privilege('payroll.manage') THEN
+    RAISE EXCEPTION 'You do not have permission to manage payroll';
+  END IF;
+
+  IF p_period_start IS NULL OR p_period_end IS NULL OR p_period_end < p_period_start THEN
+    RAISE EXCEPTION 'Invalid pay period';
+  END IF;
+
+  SELECT id INTO v_dup
+    FROM payroll_runs
+   WHERE pay_period_start = p_period_start AND pay_period_end = p_period_end
+     AND status <> 'VOID'
+   LIMIT 1;
+  IF v_dup IS NOT NULL THEN
+    RAISE EXCEPTION 'A payroll run already exists for this period';
+  END IF;
+
+  v_tax_rate := COALESCE(
+    (SELECT value::numeric FROM system_settings WHERE group_name = 'payroll' AND key = 'tax_rate_pct'),
+    10
+  );
+
+  INSERT INTO payroll_runs (name, pay_period_start, pay_period_end, status, total_gross, total_deductions, total_net)
+  VALUES (
+    COALESCE(NULLIF(p_name, ''), 'Payroll ' || to_char(p_period_start, 'Mon YYYY')),
+    p_period_start,
+    p_period_end,
+    'DRAFT',
+    0, 0, 0
+  )
+  RETURNING id INTO v_run_id;
+
+  FOR v_emp_id IN
+    SELECT e.id
+      FROM employees e
+     WHERE e.employment_status NOT IN ('TERMINATED', 'RESIGNED', 'EXITED', 'DISENGAGED', 'DISABLED')
+       AND (p_employee_ids IS NULL OR e.id = ANY (p_employee_ids))
+     ORDER BY e.first_name, e.last_name
+  LOOP
+    v_row := public._payroll_calc_for(v_emp_id, p_period_start, p_period_end, v_tax_rate);
+
+    INSERT INTO payslips (
+      payroll_run_id, employee_id, gross_pay, total_deductions, net_pay,
+      earnings, deductions, status, generated_at
+    ) VALUES (
+      v_run_id,
+      v_emp_id,
+      (v_row->>'gross')::numeric,
+      (v_row->>'deductions_total')::numeric,
+      (v_row->>'net')::numeric,
+      COALESCE(v_row->'earnings', '[]'::jsonb),
+      COALESCE(v_row->'deductions', '[]'::jsonb),
+      'GENERATED',
+      now()
+    );
+
+    v_tot_gross      := v_tot_gross + (v_row->>'gross')::numeric;
+    v_tot_deductions := v_tot_deductions + (v_row->>'deductions_total')::numeric;
+    v_tot_net        := v_tot_net + (v_row->>'net')::numeric;
+    v_created_count  := v_created_count + 1;
+  END LOOP;
+
+  IF v_created_count = 0 THEN
+    DELETE FROM payroll_runs WHERE id = v_run_id;
+    RAISE EXCEPTION 'No eligible employees for the selected period';
+  END IF;
+
+  UPDATE payroll_runs
+     SET total_gross      = round(v_tot_gross, 2),
+         total_deductions = round(v_tot_deductions, 2),
+         total_net        = round(v_tot_net, 2)
+   WHERE id = v_run_id;
+
+  RETURN v_run_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.payroll_preview(date, date, uuid[]) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.generate_payroll_run(text, date, date, uuid[]) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.payroll_preview(date, date, uuid[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.generate_payroll_run(text, date, date, uuid[]) FROM PUBLIC;
+
+-- ===========================================================================
+-- 5. Reset employee login password (admin) -> invalidates old password and
+--    issues a fresh setup token. The UI sends the `password.reset` template
+--    with a /setup-account?token=... link built from the returned raw token.
+-- ===========================================================================
+CREATE OR REPLACE FUNCTION public.reset_employee_password(p_employee_id uuid)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_raw text;
+BEGIN
+  IF NOT (public.has_privilege('employees.manage') OR public.has_privilege('admin.privileges')) THEN
+    RAISE EXCEPTION 'You do not have permission to reset passwords';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM public.employees WHERE id = p_employee_id) THEN
+    RAISE EXCEPTION 'Employee not found';
+  END IF;
+
+  -- Old password stops working until the employee picks a new one via the link.
+  UPDATE public.employees
+     SET password_hash       = NULL,
+         password_updated_at = NULL,
+         must_change_password = false,
+         updated_at          = now()
+   WHERE id = p_employee_id;
+
+  v_raw := encode(extensions.gen_random_bytes(32), 'hex');
+
+  DELETE FROM public.employee_setup_tokens WHERE employee_id = p_employee_id;
+
+  INSERT INTO public.employee_setup_tokens (employee_id, token_hash, expires_at, created_by)
+  VALUES (p_employee_id,
+          encode(extensions.digest(v_raw, 'sha256'), 'hex'),
+          now() + interval '72 hours',
+          public.current_employee_id());
+
+  RETURN v_raw;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.reset_employee_password(uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.reset_employee_password(uuid) FROM PUBLIC;
+
+-- ===========================================================================
+-- 3. Approved workflows = immutable; managers can appeal to reopen.
+-- ===========================================================================
+
+-- Reopen an APPROVED workflow instance for a fresh approval round.
+CREATE OR REPLACE FUNCTION public.appeal_workflow_step(
+  p_instance_id uuid,
+  p_comment text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_instance workflow_instances%ROWTYPE;
+  v_caller_id uuid := public.current_employee_id();
+  v_caller_role text;
+  v_first_step uuid;
+BEGIN
+  SELECT * INTO v_instance FROM workflow_instances WHERE id = p_instance_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Workflow instance not found';
+  END IF;
+  IF v_instance.status <> 'APPROVED' THEN
+    RAISE EXCEPTION 'Only approved workflows can be appealed';
+  END IF;
+
+  SELECT role INTO v_caller_role FROM employees WHERE id = v_caller_id;
+  IF NOT (public.has_privilege('admin.settings')
+          OR COALESCE(v_caller_role, '') IN ('MANAGER', 'HR_ADMIN', 'SUPER_ADMIN')) THEN
+    RAISE EXCEPTION 'Only managers or administrators can appeal an approved workflow';
+  END IF;
+
+  SELECT id INTO v_first_step
+    FROM workflow_steps
+   WHERE workflow_definition_id = v_instance.workflow_definition_id
+   ORDER BY sort_order ASC, created_at ASC
+   LIMIT 1;
+  IF v_first_step IS NULL THEN
+    RAISE EXCEPTION 'Workflow has no steps to rerun';
+  END IF;
+
+  INSERT INTO workflow_actions (workflow_instance_id, step_id, action, actor_id, comment)
+  VALUES (v_instance.id, v_instance.current_step_id, 'APPEAL', v_caller_id, p_comment);
+
+  UPDATE workflow_instances
+     SET status = 'PENDING',
+         current_step_id = v_first_step,
+         completed_at = NULL,
+         updated_at = now()
+   WHERE id = v_instance.id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.appeal_workflow_step(uuid, text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.appeal_workflow_step(uuid, text) FROM PUBLIC;
+
+-- Feed for the Approvals page: APPROVED workflow instances the caller may appeal.
+CREATE OR REPLACE FUNCTION public.appealable_workflows()
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_caller_id uuid := public.current_employee_id();
+  v_caller_role text;
+  v_rows jsonb := '[]'::jsonb;
+  v_r record;
+  v_requester text;
+  v_def_name text;
+BEGIN
+  IF v_caller_id IS NULL THEN
+    RETURN '[]'::jsonb;
+  END IF;
+
+  SELECT role INTO v_caller_role FROM employees WHERE id = v_caller_id;
+  IF NOT (public.has_privilege('admin.settings')
+          OR COALESCE(v_caller_role, '') IN ('MANAGER', 'HR_ADMIN', 'SUPER_ADMIN')) THEN
+    RETURN '[]'::jsonb;
+  END IF;
+
+  FOR v_r IN
+    SELECT wi.id, wi.module_key, wi.record_id, wi.initiated_by, wi.initiated_at,
+           wi.workflow_definition_id, wi.updated_at
+      FROM workflow_instances wi
+     WHERE wi.status = 'APPROVED'
+     ORDER BY wi.updated_at DESC
+  LOOP
+    SELECT COALESCE(e.first_name || ' ' || e.last_name, '') INTO v_requester
+      FROM employees e WHERE e.id = v_r.initiated_by;
+
+    SELECT COALESCE(name, '') INTO v_def_name FROM workflow_definitions WHERE id = v_r.workflow_definition_id;
+
+    v_rows := v_rows || jsonb_build_array(jsonb_build_object(
+      'instance_id',     v_r.id,
+      'module_key',      v_r.module_key,
+      'record_id',       v_r.record_id,
+      'requester_name',  v_requester,
+      'workflow_name',   COALESCE(v_def_name, v_r.module_key),
+      'initiated_at',    to_char(v_r.initiated_at, 'YYYY-MM-DD"T"HH24:MI:SS'),
+      'approved_at',     to_char(v_r.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS')
+    ));
+  END LOOP;
+
+  RETURN v_rows;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.appealable_workflows() TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.appealable_workflows() FROM PUBLIC;
+
+-- Lock trigger: an approved workflow instance makes the source record immutable.
+-- The workflow-propagation writer sets app.workflow_approved = <record_id> to
+-- authorise its own write. SUPER_ADMIN may always edit.
+CREATE OR REPLACE FUNCTION public.prevent_edit_of_approved_workflow_records()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_actor uuid := public.current_employee_id();
+  v_role text;
+  v_locked boolean;
+BEGIN
+  IF current_setting('app.workflow_approved', true) = OLD.id::text THEN
+    RETURN COALESCE(NEW, OLD);
+  END IF;
+
+  SELECT role INTO v_role FROM public.employees WHERE id = v_actor;
+  IF COALESCE(v_role, '') = 'SUPER_ADMIN' THEN
+    RETURN COALESCE(NEW, OLD);
+  END IF;
+
+  SELECT EXISTS (
+      SELECT 1 FROM public.workflow_instances wi
+       WHERE wi.module_key = TG_ARGV[0]
+         AND wi.record_id = OLD.id
+         AND wi.status = 'APPROVED'
+  ) AND NOT EXISTS (
+      SELECT 1 FROM public.workflow_instances wi2
+       WHERE wi2.module_key = TG_ARGV[0]
+         AND wi2.record_id = OLD.id
+         AND wi2.status = 'PENDING'
+  ) INTO v_locked;
+
+  IF v_locked THEN
+    RAISE EXCEPTION 'This record is locked because it has an approved workflow. Submit an appeal to reopen it for approval.';
+  END IF;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.prevent_edit_of_approved_workflow_records() FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS trg_lock_approved_wf ON leave_requests;
+CREATE TRIGGER trg_lock_approved_wf
+  BEFORE UPDATE OR DELETE ON leave_requests
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_edit_of_approved_workflow_records('leave');
+
+DROP TRIGGER IF EXISTS trg_lock_approved_wf ON leave_encashment_requests;
+CREATE TRIGGER trg_lock_approved_wf
+  BEFORE UPDATE OR DELETE ON leave_encashment_requests
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_edit_of_approved_workflow_records('leave.encashment');
+
+DROP TRIGGER IF EXISTS trg_lock_approved_wf ON recruitment_requisitions;
+CREATE TRIGGER trg_lock_approved_wf
+  BEFORE UPDATE OR DELETE ON recruitment_requisitions
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_edit_of_approved_workflow_records('recruitment.requisition');
+
+DROP TRIGGER IF EXISTS trg_lock_approved_wf ON procurement_requisitions;
+CREATE TRIGGER trg_lock_approved_wf
+  BEFORE UPDATE OR DELETE ON procurement_requisitions
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_edit_of_approved_workflow_records('procurement.requisition');
+
+DROP TRIGGER IF EXISTS trg_lock_approved_wf ON purchase_orders;
+CREATE TRIGGER trg_lock_approved_wf
+  BEFORE UPDATE OR DELETE ON purchase_orders
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_edit_of_approved_workflow_records('procurement.purchase_order');
+
+DROP TRIGGER IF EXISTS trg_lock_approved_wf ON procurement_invoices;
+CREATE TRIGGER trg_lock_approved_wf
+  BEFORE UPDATE OR DELETE ON procurement_invoices
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_edit_of_approved_workflow_records('procurement.invoice');
+
+DROP TRIGGER IF EXISTS trg_lock_approved_wf ON procurement_payment_requests;
+CREATE TRIGGER trg_lock_approved_wf
+  BEFORE UPDATE OR DELETE ON procurement_payment_requests
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_edit_of_approved_workflow_records('procurement.payment');
+
+-- Definitive workflow-result propagator: includes every module branch AND sets
+-- the per-record override so the source-table lock trigger accepts the verdict.
+DROP TRIGGER IF EXISTS trg_apply_workflow_result ON workflow_instances;
+CREATE OR REPLACE FUNCTION public.apply_workflow_result_to_record()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NEW.status IN ('APPROVED', 'REJECTED') AND (OLD.status IS DISTINCT FROM NEW.status) THEN
+    PERFORM set_config('app.workflow_approved', NEW.record_id::text, true);
+
+    IF NEW.module_key = 'leave' THEN
+      UPDATE leave_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'leave.encashment' THEN
+      UPDATE leave_encashment_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.requisition' THEN
+      UPDATE procurement_requisitions
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.purchase_order' THEN
+      UPDATE purchase_orders
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.invoice' THEN
+      UPDATE procurement_invoices
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.payment' THEN
+      UPDATE procurement_payment_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'recruitment.requisition' THEN
+      UPDATE recruitment_requisitions
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_apply_workflow_result
+  AFTER UPDATE ON workflow_instances
+  FOR EACH ROW EXECUTE FUNCTION public.apply_workflow_result_to_record();
+
+REVOKE EXECUTE ON FUNCTION public.apply_workflow_result_to_record() FROM PUBLIC;
+
+-- ===========================================================================
+-- 2. Profile lock at ACTIVE + employee change requests
+-- ===========================================================================
+
+-- Change-request ledger (self-service edits once the profile is locked).
+CREATE TABLE IF NOT EXISTS employee_change_requests (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  employee_id uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  section text NOT NULL DEFAULT 'OTHER',
+  field_name text NOT NULL,
+  old_value jsonb,
+  new_value jsonb NOT NULL,
+  reason text,
+  status text NOT NULL DEFAULT 'PENDING',   -- PENDING | APPROVED | REJECTED
+  requested_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  requested_at timestamptz DEFAULT now(),
+  reviewed_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  reviewed_at timestamptz,
+  review_note text
+);
+ALTER TABLE employee_change_requests ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS idx_emp_change_requests_emp
+  ON employee_change_requests(employee_id, status);
+CREATE INDEX IF NOT EXISTS idx_emp_change_requests_status
+  ON employee_change_requests(status, requested_at);
+
+DROP POLICY IF EXISTS "select_employee_change_requests" ON employee_change_requests;
+DROP POLICY IF EXISTS "insert_employee_change_requests" ON employee_change_requests;
+DROP POLICY IF EXISTS "update_employee_change_requests" ON employee_change_requests;
+DROP POLICY IF EXISTS "delete_employee_change_requests" ON employee_change_requests;
+CREATE POLICY "select_employee_change_requests" ON employee_change_requests FOR SELECT TO authenticated
+  USING (employee_id = public.current_employee_id()
+         OR public.has_any_privilege(ARRAY['employees.view_all', 'employees.manage']));
+CREATE POLICY "insert_employee_change_requests" ON employee_change_requests FOR INSERT TO authenticated
+  WITH CHECK (employee_id = public.current_employee_id() OR public.has_privilege('employees.manage'));
+CREATE POLICY "update_employee_change_requests" ON employee_change_requests FOR UPDATE TO authenticated
+  USING (public.has_privilege('employees.manage'))
+  WITH CHECK (public.has_privilege('employees.manage'));
+CREATE POLICY "delete_employee_change_requests" ON employee_change_requests FOR DELETE TO authenticated
+  USING (public.has_privilege('employees.manage'));
+
+-- Fields an ACTIVE employee may request changes for. Compensation, banking
+-- numbers that are payroll-controlled and role/access fields are excluded
+-- (they are handled by HR directly).
+CREATE OR REPLACE FUNCTION public.submit_employee_change_request(
+  p_field_name text,
+  p_new_value text,
+  p_reason text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_emp_id uuid := public.current_employee_id();
+  v_status text;
+  v_field text;
+  v_section text;
+  v_old jsonb;
+  v_id uuid;
+BEGIN
+  IF v_emp_id IS NULL THEN
+    RAISE EXCEPTION 'You must be signed in to request a change';
+  END IF;
+
+  SELECT employment_status INTO v_status FROM public.employees WHERE id = v_emp_id;
+  IF COALESCE(v_status, '') <> 'ACTIVE' THEN
+    RAISE EXCEPTION 'Change requests are only available for active employees';
+  END IF;
+
+  v_field := lower(p_field_name);
+  IF NOT (v_field = ANY (ARRAY[
+    'first_name', 'last_name', 'gender', 'date_of_birth', 'marital_status',
+    'nationality', 'state_of_origin', 'lga', 'blood_group', 'genotype',
+    'disability_status', 'disability_details',
+    'phone', 'email', 'address', 'city', 'state', 'country', 'postal_code',
+    'residential_address', 'permanent_address',
+    'emergency_contact_name', 'emergency_contact_phone',
+    'bank_name', 'bank_account_number', 'bank_routing_number'
+  ])) THEN
+    RAISE EXCEPTION 'This field cannot be changed via a self-service request';
+  END IF;
+
+  v_section := CASE
+    WHEN v_field IN ('bank_name', 'bank_account_number', 'bank_routing_number') THEN 'BANK'
+    WHEN v_field IN ('emergency_contact_name', 'emergency_contact_phone') THEN 'EMERGENCY'
+    WHEN v_field IN ('phone', 'email', 'address', 'city', 'state', 'country',
+                     'postal_code', 'residential_address', 'permanent_address') THEN 'CONTACT'
+    ELSE 'PERSONAL'
+  END;
+
+  EXECUTE format('SELECT to_jsonb(%I) FROM public.employees WHERE id = $1', v_field)
+    INTO v_old
+    USING v_emp_id;
+
+  INSERT INTO public.employee_change_requests
+    (employee_id, section, field_name, old_value, new_value, reason, requested_by)
+  VALUES
+    (v_emp_id, v_section, v_field, v_old, to_jsonb(p_new_value), p_reason, v_emp_id)
+  RETURNING id INTO v_id;
+
+  RETURN v_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.submit_employee_change_request(text, text, text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.submit_employee_change_request(text, text, text) FROM PUBLIC;
+
+-- HR review: approve applies the requested value to the employee row.
+CREATE OR REPLACE FUNCTION public.review_employee_change_request(
+  p_request_id uuid,
+  p_approve boolean,
+  p_note text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_req employee_change_requests%ROWTYPE;
+  v_reviewer uuid := public.current_employee_id();
+BEGIN
+  IF NOT public.has_privilege('employees.manage') THEN
+    RAISE EXCEPTION 'You need employees.manage to review change requests';
+  END IF;
+
+  SELECT * INTO v_req FROM employee_change_requests WHERE id = p_request_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Change request not found';
+  END IF;
+  IF v_req.status <> 'PENDING' THEN
+    RAISE EXCEPTION 'This request has already been reviewed';
+  END IF;
+
+  IF p_approve THEN
+    IF NOT (v_req.field_name = ANY (ARRAY[
+      'first_name', 'last_name', 'gender', 'date_of_birth', 'marital_status',
+      'nationality', 'state_of_origin', 'lga', 'blood_group', 'genotype',
+      'disability_status', 'disability_details',
+      'phone', 'email', 'address', 'city', 'state', 'country', 'postal_code',
+      'residential_address', 'permanent_address',
+      'emergency_contact_name', 'emergency_contact_phone',
+      'bank_name', 'bank_account_number', 'bank_routing_number'
+    ])) THEN
+      RAISE EXCEPTION 'This field cannot be changed via a change request';
+    END IF;
+
+    IF v_req.field_name = 'date_of_birth' THEN
+      EXECUTE format('UPDATE public.employees SET %I = $1::date, updated_at = now() WHERE id = $2',
+                     v_req.field_name)
+        USING v_req.new_value #>> '{}', v_req.employee_id;
+    ELSE
+      EXECUTE format('UPDATE public.employees SET %I = $1, updated_at = now() WHERE id = $2',
+                     v_req.field_name)
+        USING v_req.new_value #>> '{}', v_req.employee_id;
+    END IF;
+  END IF;
+
+  UPDATE employee_change_requests
+     SET status = CASE WHEN p_approve THEN 'APPROVED' ELSE 'REJECTED' END,
+         reviewed_by = v_reviewer,
+         reviewed_at = now(),
+         review_note = p_note
+   WHERE id = p_request_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.review_employee_change_request(uuid, boolean, text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.review_employee_change_request(uuid, boolean, text) FROM PUBLIC;
+
+-- Restrict SELF-service edits on the employees table to the onboarding phase.
+DROP POLICY IF EXISTS "update_employees" ON employees;
+CREATE POLICY "update_employees" ON employees FOR UPDATE TO authenticated
+  USING (id = public.current_employee_id() OR public.has_privilege('employees.manage'))
+  WITH CHECK (
+    public.has_privilege('employees.manage')
+    OR (
+      id = public.current_employee_id()
+      AND role = (SELECT e.role FROM employees e WHERE e.id = public.current_employee_id())
+      AND (SELECT e.employment_status FROM employees e WHERE e.id = public.current_employee_id())
+          IN ('ONBOARDING', 'PENDING_VERIFICATION')
+      AND COALESCE(password_hash,
+          (SELECT e.password_hash FROM employees e WHERE e.id = public.current_employee_id()))
+          = (SELECT e.password_hash FROM employees e WHERE e.id = public.current_employee_id())
+      AND COALESCE(password_updated_at,
+          (SELECT e.password_updated_at FROM employees e WHERE e.id = public.current_employee_id()))
+          = (SELECT e.password_updated_at FROM employees e WHERE e.id = public.current_employee_id())
+    )
+  );
+
+-- Per-employee sub-records: same lock applied via a single BEFORE trigger.
+CREATE OR REPLACE FUNCTION public.restrict_profile_edits_when_active()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_actor uuid := public.current_employee_id();
+  v_emp uuid;
+  v_status text;
+BEGIN
+  IF v_actor IS NULL OR public.has_privilege('employees.manage') THEN
+    RETURN COALESCE(NEW, OLD);
+  END IF;
+
+  v_emp := CASE WHEN TG_OP = 'DELETE' THEN OLD.employee_id ELSE NEW.employee_id END;
+  SELECT employment_status INTO v_status FROM public.employees WHERE id = v_emp;
+  IF v_status = 'ACTIVE' THEN
+    RAISE EXCEPTION 'Your profile is locked. Submit a change request for HR review instead.';
+  END IF;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.restrict_profile_edits_when_active() FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS trg_lock_profile_active ON employee_employment;
+CREATE TRIGGER trg_lock_profile_active
+  BEFORE INSERT OR UPDATE OR DELETE ON employee_employment
+  FOR EACH ROW EXECUTE FUNCTION public.restrict_profile_edits_when_active();
+
+DROP TRIGGER IF EXISTS trg_lock_profile_active ON employee_guarantors;
+CREATE TRIGGER trg_lock_profile_active
+  BEFORE INSERT OR UPDATE OR DELETE ON employee_guarantors
+  FOR EACH ROW EXECUTE FUNCTION public.restrict_profile_edits_when_active();
+
+DROP TRIGGER IF EXISTS trg_lock_profile_active ON employee_medical;
+CREATE TRIGGER trg_lock_profile_active
+  BEFORE INSERT OR UPDATE OR DELETE ON employee_medical
+  FOR EACH ROW EXECUTE FUNCTION public.restrict_profile_edits_when_active();
+
+DROP TRIGGER IF EXISTS trg_lock_profile_active ON employee_qualifications;
+CREATE TRIGGER trg_lock_profile_active
+  BEFORE INSERT OR UPDATE OR DELETE ON employee_qualifications
+  FOR EACH ROW EXECUTE FUNCTION public.restrict_profile_edits_when_active();
+
+DROP TRIGGER IF EXISTS trg_lock_profile_active ON employee_documents;
+CREATE TRIGGER trg_lock_profile_active
+  BEFORE INSERT OR UPDATE OR DELETE ON employee_documents
+  FOR EACH ROW EXECUTE FUNCTION public.restrict_profile_edits_when_active();
+
+DROP TRIGGER IF EXISTS trg_lock_profile_active ON employee_emergency_contacts;
+CREATE TRIGGER trg_lock_profile_active
+  BEFORE INSERT OR UPDATE OR DELETE ON employee_emergency_contacts
+  FOR EACH ROW EXECUTE FUNCTION public.restrict_profile_edits_when_active();
+
+DROP TRIGGER IF EXISTS trg_lock_profile_active ON employee_certifications;
+CREATE TRIGGER trg_lock_profile_active
+  BEFORE INSERT OR UPDATE OR DELETE ON employee_certifications
+  FOR EACH ROW EXECUTE FUNCTION public.restrict_profile_edits_when_active();
+
+DROP TRIGGER IF EXISTS trg_lock_profile_active ON employee_competencies;
+CREATE TRIGGER trg_lock_profile_active
+  BEFORE INSERT OR UPDATE OR DELETE ON employee_competencies
+  FOR EACH ROW EXECUTE FUNCTION public.restrict_profile_edits_when_active();
+
+DROP TRIGGER IF EXISTS trg_lock_profile_active ON employee_health_metrics;
+CREATE TRIGGER trg_lock_profile_active
+  BEFORE INSERT OR UPDATE OR DELETE ON employee_health_metrics
+  FOR EACH ROW EXECUTE FUNCTION public.restrict_profile_edits_when_active();
+
+-- ===========================================================================
+-- 20261013000001_relax_onboarding_required_fields.sql
+-- ===========================================================================
+
+-- ===========================================================================
+-- Relax employee onboarding completion requirements.
+--
+-- Previously an employee could not complete onboarding until a hard-coded
+-- set of personal fields existed (phone, date_of_birth, gender, address,
+-- city, emergency contact). Non-required detail fields and optional steps
+-- should not block the employee from finishing onboarding. Required-ness is
+-- now driven solely by the assigned onboarding template
+-- (`onboarding_steps.is_required`). Employees with no assigned checklist are
+-- considered ready.
+--
+-- Supersedes the onboarding_ready() body from
+-- 20260924000001_hr_employee_lifecycle.sql (section 1).
+-- ===========================================================================
+
+CREATE OR REPLACE FUNCTION public.onboarding_ready(p_employee_id uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_open integer;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM employees WHERE id = p_employee_id) THEN
+    RETURN false;
+  END IF;
+
+  SELECT COUNT(*) INTO v_open
+    FROM employee_onboarding_progress p
+    JOIN onboarding_steps s ON s.id = p.step_id
+   WHERE p.employee_id = p_employee_id
+     AND s.is_required
+     AND p.status IN ('PENDING', 'IN_PROGRESS');
+
+  RETURN v_open = 0;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.onboarding_ready(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.complete_onboarding(uuid) TO authenticated;
+
+REVOKE EXECUTE ON FUNCTION public.onboarding_ready(uuid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.complete_onboarding(uuid) FROM PUBLIC;
+
+-- ===========================================================================
+-- 20261014000001_self_approval_guards_and_expense_module.sql
+-- ===========================================================================
+
+-- ============================================================
+-- Source: 20261014000001_self_approval_guards_and_expense_module.sql
+-- ============================================================
+--
+-- # Impress spending (Expense Claim / Retirement) + governance hardening
+--
+-- 1. **Self-approval guards (leave + workflow)**
+--    - Nobody may approve/reject/retire a request they raised. Enforced at
+--      the DB level so it holds regardless of the client.
+--      * `approve_workflow_step` / `reject_workflow_step` raise when the
+--        caller initiated the workflow.
+--      * `pending_approvals` stops surfacing your own requests in the inbox.
+--      * `leave_requests` gets a BEFORE UPDATE trigger blocking an owner from
+--        flipping their own request to APPROVED/REJECTED (the manager / HR
+--        approval path and the workflow engine are unaffected).
+-- 2. **Employee-only data visibility (field_values)**
+--    - Generic comp-record rows previously exposed every non-medical
+--      `field_values` row to any signed-in user. The SELECT policy now
+--      requires ownership of the parent record (via `employee_owns_field_value`)
+--      or the relevant privilege (`employees.view_all`, `employees.manage`,
+--      `admin.settings`; `employee_medical` keeps its dedicated `employees.medical`
+--      gate).
+-- 3. **Expense Claim + Expense Retirement module**
+--    - `expense_categories`: seeded reference list of spending categories.
+--    - `expense_claims`: single table for both kinds (`CLAIM` for expenses
+--      to be reimbursed, `RETIREMENT` for retiring impress cash advances).
+--      Every claim tracks proof/invoice attachment metadata; a claim cannot be
+--      RETIRED without an attached proof and only from APPROVED.
+--    - Status flow: PENDING -> APPROVED -> RETIRED (REJECTED / CANCELLED
+--      terminal). Employees may cancel their own PENDING rows and attach proof;
+--      only `expense.manage` / `expense.approve` holders may approve/reject/
+--      retire, and never their own claims.
+--    - `approve_expense_claim(id, action, note)` RPC for approvers (validates
+--      privilege, self-approval, status and proof requirements).
+--    - `expense-proofs` private storage bucket; uploads land in
+--      `<claim_id>/<file>`, readable/writable by the claimant and approvers.
+-- 4. **Privilege catalog** -> new `Expenses` category (manage / approve).
+
+-- ============================================================
+-- 1. Self-approval guards
+-- ============================================================
+
+-- 1a. Workflow steps: nobody acts on their own request.
+CREATE OR REPLACE FUNCTION public.approve_workflow_step(
+  p_instance_id uuid,
+  p_comment text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_instance workflow_instances%ROWTYPE;
+  v_caller_id uuid := public.current_employee_id();
+  v_caller_role text;
+  v_step workflow_steps%ROWTYPE;
+  v_next_step_id uuid;
+BEGIN
+  SELECT * INTO v_instance FROM workflow_instances WHERE id = p_instance_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Workflow instance not found'; END IF;
+  IF v_instance.status <> 'PENDING' THEN RAISE EXCEPTION 'This workflow has already been completed'; END IF;
+  IF v_instance.current_step_id IS NULL THEN RAISE EXCEPTION 'Workflow has no pending step'; END IF;
+
+  IF v_caller_id IS NOT NULL AND v_instance.initiated_by = v_caller_id THEN
+    RAISE EXCEPTION 'You cannot approve a request you initiated';
+  END IF;
+
+  SELECT * INTO v_step FROM workflow_steps WHERE id = v_instance.current_step_id;
+  SELECT role INTO v_caller_role FROM employees WHERE id = v_caller_id;
+
+  IF NOT (
+       public.has_privilege('admin.settings')
+    OR (v_step.approver_user_id IS NOT NULL AND v_step.approver_user_id = v_caller_id)
+    OR (v_step.approver_role IS NOT NULL AND v_step.approver_role = v_caller_role)
+  ) THEN
+    RAISE EXCEPTION 'You are not an approver for this step';
+  END IF;
+
+  INSERT INTO workflow_actions (workflow_instance_id, step_id, action, actor_id, comment)
+  VALUES (v_instance.id, v_step.id, 'APPROVE', v_caller_id, p_comment);
+
+  SELECT ws.id INTO v_next_step_id
+    FROM workflow_steps ws
+   WHERE ws.workflow_definition_id = v_instance.workflow_definition_id
+     AND ws.sort_order > v_step.sort_order
+   ORDER BY ws.sort_order ASC, ws.created_at ASC
+   LIMIT 1;
+
+  IF v_next_step_id IS NULL THEN
+    UPDATE workflow_instances
+       SET status = 'APPROVED', current_step_id = NULL, completed_at = now(), updated_at = now()
+     WHERE id = v_instance.id;
+  ELSE
+    UPDATE workflow_instances
+       SET current_step_id = v_next_step_id, updated_at = now()
+     WHERE id = v_instance.id;
+  END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.reject_workflow_step(
+  p_instance_id uuid,
+  p_comment text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_instance workflow_instances%ROWTYPE;
+  v_caller_id uuid := public.current_employee_id();
+  v_caller_role text;
+  v_step workflow_steps%ROWTYPE;
+BEGIN
+  SELECT * INTO v_instance FROM workflow_instances WHERE id = p_instance_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Workflow instance not found'; END IF;
+  IF v_instance.status <> 'PENDING' THEN RAISE EXCEPTION 'This workflow has already been completed'; END IF;
+  IF v_instance.current_step_id IS NULL THEN RAISE EXCEPTION 'Workflow has no pending step'; END IF;
+
+  IF v_caller_id IS NOT NULL AND v_instance.initiated_by = v_caller_id THEN
+    RAISE EXCEPTION 'You cannot reject a request you initiated';
+  END IF;
+
+  SELECT * INTO v_step FROM workflow_steps WHERE id = v_instance.current_step_id;
+  SELECT role INTO v_caller_role FROM employees WHERE id = v_caller_id;
+
+  IF NOT (
+       public.has_privilege('admin.settings')
+    OR (v_step.approver_user_id IS NOT NULL AND v_step.approver_user_id = v_caller_id)
+    OR (v_step.approver_role IS NOT NULL AND v_step.approver_role = v_caller_role)
+  ) THEN
+    RAISE EXCEPTION 'You are not an approver for this step';
+  END IF;
+
+  INSERT INTO workflow_actions (workflow_instance_id, step_id, action, actor_id, comment)
+  VALUES (v_instance.id, v_step.id, 'REJECT', v_caller_id, p_comment);
+
+  UPDATE workflow_instances
+     SET status = 'REJECTED', current_step_id = NULL, completed_at = now(), updated_at = now()
+   WHERE id = v_instance.id;
+END;
+$$;
+
+-- 1b. Approvals inbox: never surface your own requests.
+CREATE OR REPLACE FUNCTION public.pending_approvals()
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_caller_id uuid := public.current_employee_id();
+  v_caller_role text;
+  v_rows jsonb := '[]'::jsonb;
+  v_instance RECORD;
+  v_requester_name text;
+  v_step_title text;
+  v_step_ord integer;
+  v_def_name text;
+BEGIN
+  IF v_caller_id IS NULL THEN
+    RETURN '[]'::jsonb;
+  END IF;
+
+  SELECT role INTO v_caller_role FROM employees WHERE id = v_caller_id;
+  v_caller_role := COALESCE(v_caller_role, '');
+
+  FOR v_instance IN
+    SELECT wi.id, wi.module_key, wi.record_id, wi.status, wi.initiated_by, wi.initiated_at,
+           wi.workflow_definition_id, wi.current_step_id
+      FROM workflow_instances wi
+     WHERE wi.status = 'PENDING'
+       AND wi.initiated_by IS DISTINCT FROM v_caller_id
+       AND (
+            public.has_privilege('admin.settings')
+         OR EXISTS (
+               SELECT 1 FROM workflow_steps ws
+                WHERE ws.id = wi.current_step_id
+                  AND (ws.approver_user_id = v_caller_id
+                       OR ws.approver_role = v_caller_role)
+             )
+           )
+     ORDER BY wi.initiated_at ASC
+  LOOP
+    SELECT COALESCE(e.first_name || ' ' || e.last_name, '') INTO v_requester_name
+      FROM employees e WHERE e.id = v_instance.initiated_by;
+
+    SELECT ws.sort_order INTO v_step_ord
+      FROM workflow_steps ws WHERE ws.id = v_instance.current_step_id;
+    v_step_title := COALESCE(v_step_ord::text, '');
+    v_step_title := 'Step ' || v_step_title;
+
+    SELECT name INTO v_def_name FROM workflow_definitions WHERE id = v_instance.workflow_definition_id;
+    v_def_name := COALESCE(v_def_name, v_instance.module_key);
+
+    v_rows := v_rows || jsonb_build_array(jsonb_build_object(
+      'instance_id',       v_instance.id,
+      'module_key',        v_instance.module_key,
+      'record_id',         v_instance.record_id,
+      'status',            v_instance.status,
+      'initiated_by',      v_instance.initiated_by,
+      'requester_name',    v_requester_name,
+      'initiated_at',      to_char(v_instance.initiated_at, 'YYYY-MM-DD"T"HH24:MI:SS'),
+      'workflow_name',     v_def_name,
+      'step_title',        v_step_title,
+      'step_order',        v_step_ord
+    ));
+  END LOOP;
+
+  RETURN v_rows;
+END;
+$$;
+
+-- 1c. Leave: owners cannot push their own request to APPROVED / REJECTED.
+CREATE OR REPLACE FUNCTION public.guard_self_leave_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_actor uuid := public.current_employee_id();
+BEGIN
+  IF NEW.status IN ('APPROVED', 'REJECTED')
+     AND NEW.status IS DISTINCT FROM OLD.status
+     AND v_actor = OLD.employee_id THEN
+    RAISE EXCEPTION 'You cannot approve or reject your own leave request';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_guard_self_leave_approval ON leave_requests;
+CREATE TRIGGER trg_guard_self_leave_approval
+BEFORE UPDATE ON leave_requests
+FOR EACH ROW EXECUTE FUNCTION public.guard_self_leave_approval();
+
+-- ============================================================
+-- 2. field_values: employees only see records they own
+-- ============================================================
+
+-- Resolves which employee the polymorphic record belongs to so the SELECT
+-- policy can gate non-privileged readers to their own data.
+CREATE OR REPLACE FUNCTION public.employee_owns_field_value(
+  p_module_key text,
+  p_record_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    WHERE p_module_key = 'employee'
+      AND p_record_id = public.current_employee_id()
+      OR p_module_key = 'employee_documents'
+      AND EXISTS (SELECT 1 FROM public.employee_documents d
+                   WHERE d.id = p_record_id AND d.employee_id = public.current_employee_id())
+      OR p_module_key = 'employee_guarantor'
+      AND EXISTS (SELECT 1 FROM public.employee_guarantors g
+                   WHERE g.id = p_record_id AND g.employee_id = public.current_employee_id())
+      OR p_module_key = 'employee_qualifications'
+      AND EXISTS (SELECT 1 FROM public.employee_qualifications q
+                   WHERE q.id = p_record_id AND q.employee_id = public.current_employee_id())
+      OR p_module_key = 'employee_emergency_contacts'
+      AND EXISTS (SELECT 1 FROM public.employee_emergency_contacts c
+                   WHERE c.id = p_record_id AND c.employee_id = public.current_employee_id())
+      OR p_module_key = 'employee_medical'
+      AND EXISTS (SELECT 1 FROM public.employee_medical m
+                   WHERE m.id = p_record_id AND m.employee_id = public.current_employee_id())
+      OR p_module_key = 'expense_claim'
+      AND EXISTS (SELECT 1 FROM public.expense_claims ec
+                   WHERE ec.id = p_record_id AND ec.requested_by = public.current_employee_id())
+  );
+$$;
+
+DROP POLICY IF EXISTS "select_field_values" ON field_values;
+CREATE POLICY "select_field_values" ON field_values FOR SELECT TO authenticated
+  USING (
+    (
+      module_key <> 'employee_medical'
+      AND (
+        public.has_privilege('admin.settings')
+        OR public.has_privilege('employees.view_all')
+        OR public.has_privilege('employees.manage')
+        OR public.employee_owns_field_value(module_key, record_id)
+      )
+    )
+    OR
+    (
+      module_key = 'employee_medical'
+      AND (
+        record_id = public.current_employee_id()
+        OR public.has_privilege('employees.medical')
+      )
+    )
+  );
+
+-- Writers may persist custom values for records they personally own (or are
+-- allowed to manage). The medical module keeps its dedicated gate.
+DROP POLICY IF EXISTS "insert_field_values" ON field_values;
+CREATE POLICY "insert_field_values" ON field_values FOR INSERT TO authenticated
+  WITH CHECK (
+    public.has_privilege('admin.settings')
+    OR public.employee_owns_field_value(module_key, record_id)
+    OR (
+      module_key = 'employee_medical'
+      AND (record_id = public.current_employee_id() OR public.has_privilege('employees.medical'))
+    )
+  );
+
+DROP POLICY IF EXISTS "update_field_values" ON field_values;
+CREATE POLICY "update_field_values" ON field_values FOR UPDATE TO authenticated
+  USING (
+    public.has_privilege('admin.settings')
+    OR public.employee_owns_field_value(module_key, record_id)
+    OR (
+      module_key = 'employee_medical'
+      AND (record_id = public.current_employee_id() OR public.has_privilege('employees.medical'))
+    )
+  )
+  WITH CHECK (
+    public.has_privilege('admin.settings')
+    OR public.employee_owns_field_value(module_key, record_id)
+    OR (
+      module_key = 'employee_medical'
+      AND (record_id = public.current_employee_id() OR public.has_privilege('employees.medical'))
+    )
+  );
+
+DROP POLICY IF EXISTS "delete_field_values" ON field_values;
+CREATE POLICY "delete_field_values" ON field_values FOR DELETE TO authenticated
+  USING (
+    public.has_privilege('admin.settings')
+    OR public.employee_owns_field_value(module_key, record_id)
+    OR (
+      module_key = 'employee_medical'
+      AND (record_id = public.current_employee_id() OR public.has_privilege('employees.medical'))
+    )
+  );
+
+-- ============================================================
+-- 3. Expense module (Impress: Claims + Retirements)
+-- ============================================================
+
+-- 3a. Privilege catalog additions (Expenses category).
+INSERT INTO privilege_definitions (key, category, label, description, sort_order) VALUES
+  ('expense.manage',  'Expenses', 'Manage expenses', 'Approve, reject and retire expense claims and retirements', 10),
+  ('expense.approve', 'Expenses', 'Approve expenses', 'Approve and retire expense claims and retirements', 20)
+ON CONFLICT (key) DO NOTHING;
+
+-- 3b. Expense categories (reference data).
+CREATE TABLE IF NOT EXISTS expense_categories (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL UNIQUE,
+  description text,
+  is_active boolean DEFAULT true,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE expense_categories ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "select_expense_categories" ON expense_categories;
+DROP POLICY IF EXISTS "insert_expense_categories" ON expense_categories;
+DROP POLICY IF EXISTS "update_expense_categories" ON expense_categories;
+DROP POLICY IF EXISTS "delete_expense_categories" ON expense_categories;
+CREATE POLICY "select_expense_categories" ON expense_categories FOR SELECT TO authenticated USING (true);
+CREATE POLICY "insert_expense_categories" ON expense_categories FOR INSERT TO authenticated
+  WITH CHECK (public.has_privilege('expense.manage') OR public.has_privilege('admin.settings'));
+CREATE POLICY "update_expense_categories" ON expense_categories FOR UPDATE TO authenticated
+  USING (public.has_privilege('expense.manage') OR public.has_privilege('admin.settings'))
+  WITH CHECK (public.has_privilege('expense.manage') OR public.has_privilege('admin.settings'));
+CREATE POLICY "delete_expense_categories" ON expense_categories FOR DELETE TO authenticated
+  USING (public.has_privilege('expense.manage') OR public.has_privilege('admin.settings'));
+
+INSERT INTO expense_categories (name, description) VALUES
+  ('Transportation', 'Fuel, cab fares, public transport, flight tickets'),
+  ('Meals & Entertainment', 'Meals, refreshments and official entertainment'),
+  ('Accommodation', 'Hotel and lodging during official trips'),
+  ('Office Supplies', 'Stationery, printing and general office consumables'),
+  ('Medical', 'Approved medical and pharmacy expenses'),
+  ('Training & Development', 'Courses, examinations and professional development'),
+  ('Client / Vendor Gifts', 'Gifts and hospitality for clients or vendors'),
+  ('Other', 'Any other business expense approved by the manager')
+ON CONFLICT (name) DO NOTHING;
+
+-- 3c. Expense claims / retirements.
+CREATE TABLE IF NOT EXISTS expense_claims (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  claim_number text NOT NULL UNIQUE
+    DEFAULT ('EXP-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))),
+  kind text NOT NULL DEFAULT 'CLAIM'
+    CHECK (kind IN ('CLAIM', 'RETIREMENT')),
+  requested_by uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  category_id uuid REFERENCES expense_categories(id) ON DELETE SET NULL,
+  amount numeric NOT NULL DEFAULT 0 CHECK (amount >= 0),
+  currency text NOT NULL DEFAULT 'NGN',
+  expense_date date,
+  description text,
+  notes text,
+  proof_path text,
+  proof_name text,
+  proof_type text,
+  proof_size bigint,
+  status text NOT NULL DEFAULT 'PENDING'
+    CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'RETIRED', 'CANCELLED')),
+  requested_at timestamptz DEFAULT now(),
+  approved_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  approved_at timestamptz,
+  rejected_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  rejected_at timestamptz,
+  retired_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  retired_at timestamptz,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+ALTER TABLE expense_claims ENABLE ROW LEVEL SECURITY;
+
+CREATE INDEX IF NOT EXISTS idx_expense_claims_requester ON expense_claims(requested_by);
+CREATE INDEX IF NOT EXISTS idx_expense_claims_status ON expense_claims(status);
+CREATE INDEX IF NOT EXISTS idx_expense_claims_kind ON expense_claims(kind);
+
+DROP POLICY IF EXISTS "select_expense_claims" ON expense_claims;
+DROP POLICY IF EXISTS "insert_expense_claims" ON expense_claims;
+DROP POLICY IF EXISTS "update_expense_claims" ON expense_claims;
+DROP POLICY IF EXISTS "delete_expense_claims" ON expense_claims;
+CREATE POLICY "select_expense_claims" ON expense_claims FOR SELECT TO authenticated
+  USING (
+    requested_by = public.current_employee_id()
+    OR public.has_any_privilege(ARRAY['expense.manage', 'expense.approve'])
+    OR public.has_privilege('admin.settings')
+  );
+CREATE POLICY "insert_expense_claims" ON expense_claims FOR INSERT TO authenticated
+  WITH CHECK (
+    requested_by = public.current_employee_id()
+    OR public.has_privilege('expense.manage')
+  );
+CREATE POLICY "update_expense_claims" ON expense_claims FOR UPDATE TO authenticated
+  USING (
+    requested_by = public.current_employee_id()
+    OR public.has_any_privilege(ARRAY['expense.manage', 'expense.approve'])
+    OR public.has_privilege('admin.settings')
+  )
+  WITH CHECK (
+    requested_by = public.current_employee_id()
+    OR public.has_any_privilege(ARRAY['expense.manage', 'expense.approve'])
+    OR public.has_privilege('admin.settings')
+  );
+CREATE POLICY "delete_expense_claims" ON expense_claims FOR DELETE TO authenticated
+  USING (public.has_privilege('expense.manage') OR public.has_privilege('admin.settings'));
+
+-- 3d. Status / self-approval guard for expense claims.
+CREATE OR REPLACE FUNCTION public.guard_expense_claim_status()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_actor uuid := public.current_employee_id();
+BEGIN
+  IF NEW.status IS DISTINCT FROM OLD.status THEN
+    IF NEW.status IN ('APPROVED', 'REJECTED', 'RETIRED') AND v_actor = OLD.requested_by THEN
+      RAISE EXCEPTION 'You cannot approve, reject or retire a claim you raised';
+    END IF;
+
+    IF NEW.status IN ('APPROVED', 'REJECTED') THEN
+      IF NOT public.has_any_privilege(ARRAY['expense.manage', 'expense.approve']) THEN
+        RAISE EXCEPTION 'You need expense.manage or expense.approve to approve or reject expense claims';
+      END IF;
+    END IF;
+
+    IF NEW.status = 'RETIRED' THEN
+      IF old.status <> 'APPROVED' THEN
+        RAISE EXCEPTION 'Only approved claims can be retired';
+      END IF;
+      IF COALESCE(NEW.proof_path, '') = '' THEN
+        RAISE EXCEPTION 'A proof / invoice attachment is required to retire an expense claim';
+      END IF;
+      IF NOT public.has_any_privilege(ARRAY['expense.manage', 'expense.approve']) THEN
+        RAISE EXCEPTION 'You need expense.manage or expense.approve to retire an expense claim';
+      END IF;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_guard_expense_claim_status ON expense_claims;
+CREATE TRIGGER trg_guard_expense_claim_status
+BEFORE UPDATE ON expense_claims
+FOR EACH ROW EXECUTE FUNCTION public.guard_expense_claim_status();
+
+-- 3e. Approver/retirer RPC (validates everything server-side too).
+CREATE OR REPLACE FUNCTION public.approve_expense_claim(
+  p_claim_id uuid,
+  p_action text,
+  p_note text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_actor uuid := public.current_employee_id();
+  v_claim expense_claims%ROWTYPE;
+BEGIN
+  IF v_actor IS NULL THEN
+    RAISE EXCEPTION 'You must be signed in';
+  END IF;
+
+  IF p_action NOT IN ('APPROVE', 'REJECT', 'RETIRE') THEN
+    RAISE EXCEPTION 'Invalid action (APPROVE, REJECT or RETIRE expected)';
+  END IF;
+
+  IF NOT (public.has_privilege('expense.manage') OR public.has_privilege('expense.approve')) THEN
+    RAISE EXCEPTION 'You need expense.manage or expense.approve to act on expense claims';
+  END IF;
+
+  SELECT * INTO v_claim FROM expense_claims WHERE id = p_claim_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Expense claim not found';
+  END IF;
+
+  IF v_actor = v_claim.requested_by THEN
+    RAISE EXCEPTION 'You cannot approve, reject or retire a claim you raised';
+  END IF;
+
+  IF p_action = 'RETIRE' THEN
+    IF v_claim.status <> 'APPROVED' THEN
+      RAISE EXCEPTION 'Only approved claims can be retired';
+    END IF;
+    IF COALESCE(v_claim.proof_path, '') = '' THEN
+      RAISE EXCEPTION 'A proof / invoice attachment is required to retire an expense claim';
+    END IF;
+    UPDATE expense_claims
+       SET status = 'RETIRED', retired_by = v_actor, retired_at = now(),
+           notes = COALESCE(p_note, notes), updated_at = now()
+     WHERE id = v_claim.id;
+  ELSIF p_action = 'APPROVE' THEN
+    IF v_claim.status <> 'PENDING' THEN
+      RAISE EXCEPTION 'Only pending claims can be approved';
+    END IF;
+    UPDATE expense_claims
+       SET status = 'APPROVED', approved_by = v_actor, approved_at = now(),
+           notes = COALESCE(p_note, notes), updated_at = now()
+     WHERE id = v_claim.id;
+  ELSE
+    IF v_claim.status <> 'PENDING' THEN
+      RAISE EXCEPTION 'Only pending claims can be rejected';
+    END IF;
+    UPDATE expense_claims
+       SET status = 'REJECTED', rejected_by = v_actor, rejected_at = now(),
+           notes = COALESCE(p_note, notes), updated_at = now()
+     WHERE id = v_claim.id;
+  END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.approve_expense_claim(uuid, text, text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.approve_expense_claim(uuid, text, text) FROM PUBLIC;
+
+-- 3f. Proof/invoice storage bucket.
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'expense-proofs',
+  'expense-proofs',
+  false,
+  15728640, -- 15 MB
+  ARRAY['application/pdf', 'image/jpeg', 'image/png']
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- SELECT: the claimant, or anyone with expense approval/management rights.
+DROP POLICY IF EXISTS expense_proofs_select ON storage.objects;
+CREATE POLICY expense_proofs_select ON storage.objects
+  FOR SELECT
+  USING (
+    bucket_id = 'expense-proofs'
+    AND (
+      owner = auth.uid()
+      OR public.has_privilege('expense.manage')
+      OR public.has_privilege('expense.approve')
+      OR public.has_privilege('admin.settings')
+      OR EXISTS (
+            SELECT 1 FROM public.expense_claims ec
+             WHERE ec.id = (storage.foldername(name))[1]::uuid
+               AND ec.requested_by = public.current_employee_id()
+          )
+    )
+  );
+
+-- INSERT: the claimant into their own claim folder, or approvers anywhere.
+DROP POLICY IF EXISTS expense_proofs_insert ON storage.objects;
+CREATE POLICY expense_proofs_insert ON storage.objects
+  FOR INSERT
+  WITH CHECK (
+    bucket_id = 'expense-proofs'
+    AND (
+      public.has_privilege('expense.manage')
+      OR public.has_privilege('expense.approve')
+      OR public.has_privilege('admin.settings')
+      OR EXISTS (
+            SELECT 1 FROM public.expense_claims ec
+             WHERE ec.id = (storage.foldername(name))[1]::uuid
+               AND ec.requested_by = public.current_employee_id()
+          )
+    )
+  );
+
+-- DELETE: the claimant or approvers.
+DROP POLICY IF EXISTS expense_proofs_delete ON storage.objects;
+CREATE POLICY expense_proofs_delete ON storage.objects
+  FOR DELETE
+  USING (
+    bucket_id = 'expense-proofs'
+    AND (
+      owner = auth.uid()
+      OR public.has_privilege('expense.manage')
+    )
+  );
+
+-- ===========================================================================
 -- DEFAULT ADMIN EMPLOYEE (role SUPER_ADMIN => every privilege)
 -- Login:    noah.linus@constrabase.com
 -- Password: <replace the placeholder below with a strong password>

@@ -82,6 +82,14 @@ export const PRIVILEGE_CATEGORIES: PrivilegeCategory[] = [
     ],
   },
   {
+    key: 'expenses',
+    label: 'Expenses',
+    privileges: [
+      { key: 'expense.manage', label: 'Manage expenses', description: 'Approve, reject and retire expense claims and retirements' },
+      { key: 'expense.approve', label: 'Approve expenses', description: 'Approve and retire expense claims and retirements' },
+    ],
+  },
+  {
     key: 'procurement',
     label: 'Procurement',
     privileges: [

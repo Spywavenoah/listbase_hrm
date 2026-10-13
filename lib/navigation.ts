@@ -83,6 +83,8 @@ export const navSections: NavSection[] = [
     icon: Users,
     items: [
       { label: 'All Employees', href: '/employees', icon: Users, privileges: ['employees.view_all', 'employees.manage', 'employees.invite'] },
+      { label: 'Add Employee', href: '/employees/add', icon: UserPlus, privileges: ['employees.manage', 'employees.invite'] },
+      { label: 'Change Requests', href: '/employees/change-requests', icon: ClipboardList, privilege: 'employees.manage' },
       { label: 'Organization Chart', href: '/organization/org-chart', icon: Network, privilege: 'organization.manage' },
       { label: 'Departments', href: '/organization/departments', icon: Building2, privilege: 'organization.manage' },
       { label: 'Positions', href: '/organization/positions', icon: Network, privilege: 'organization.manage' },
@@ -115,6 +117,14 @@ export const navSections: NavSection[] = [
       { label: 'Encashment Requests', href: '/leave/encashments', icon: Wallet },
       { label: 'Leave Types', href: '/leave/types', icon: Settings, privilege: 'leave.settings' },
       { label: 'Holidays', href: '/leave/holidays', icon: CalendarDays, privilege: 'leave.settings' },
+    ],
+  },
+  {
+    label: 'Expenses',
+    icon: Wallet,
+    items: [
+      { label: 'Expense Claims', href: '/expenses', icon: Receipt },
+      { label: 'Expense Retirements', href: '/expenses/retirement', icon: Wallet },
     ],
   },
   {
@@ -175,8 +185,8 @@ export const navSections: NavSection[] = [
     label: 'Reports',
     icon: ChartBar,
     items: [
-      { label: 'Dashboards', href: '/reports', icon: ChartBar, privileges: ['admin.reports', 'admin.reports_read'] },
-      { label: 'Report Builder', href: '/reports/builder', icon: Wrench, privileges: ['admin.reports', 'admin.reports_write'] },
+      { label: 'Dashboards', href: '/reports', icon: ChartBar, privileges: ['admin.reports_read'] },
+      { label: 'Report Builder', href: '/reports/builder', icon: Wrench, privileges: ['admin.reports_write'] },
     ],
   },
   {

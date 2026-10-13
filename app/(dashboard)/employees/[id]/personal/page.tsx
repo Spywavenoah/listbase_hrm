@@ -7,12 +7,62 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
+} from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
 import { supabase } from '@/lib/supabase/client';
 import { toast } from 'sonner';
-import { Plus, Trash2, Users } from 'lucide-react';
+import { Plus, Trash2, Users, Lock, Send, ClipboardList } from 'lucide-react';
 import type { EmployeeEmergencyContact } from '@/lib/types';
 import { useAccess } from '@/lib/access';
+import { CustomFieldsBlock } from '@/components/field-engine/custom-fields';
+import { fetchFieldValues, saveFieldValues } from '@/lib/field-engine/client';
+
+interface ChangeRequestRow {
+  id: string;
+  field_name: string;
+  new_value: unknown;
+  reason: string | null;
+  status: string;
+  requested_at: string;
+  review_note: string | null;
+}
+
+const CHANGE_REQUEST_STATUS: Record<string, string> = {
+  PENDING: 'bg-warning/10 text-warning',
+  APPROVED: 'bg-success/10 text-success',
+  REJECTED: 'bg-destructive/10 text-destructive',
+};
+
+const CHANGE_REQUEST_FIELDS: { value: string; label: string }[] = [
+  { value: 'first_name', label: 'First name' },
+  { value: 'last_name', label: 'Last name' },
+  { value: 'phone', label: 'Phone' },
+  { value: 'email', label: 'Email' },
+  { value: 'gender', label: 'Gender' },
+  { value: 'date_of_birth', label: 'Date of birth' },
+  { value: 'marital_status', label: 'Marital status' },
+  { value: 'nationality', label: 'Nationality' },
+  { value: 'state_of_origin', label: 'State of origin' },
+  { value: 'lga', label: 'LGA' },
+  { value: 'residential_address', label: 'Residential address' },
+  { value: 'permanent_address', label: 'Permanent address' },
+  { value: 'city', label: 'City' },
+  { value: 'state', label: 'State' },
+  { value: 'country', label: 'Country' },
+  { value: 'postal_code', label: 'Postal code' },
+  { value: 'blood_group', label: 'Blood group' },
+  { value: 'genotype', label: 'Genotype' },
+  { value: 'disability_status', label: 'Disability status' },
+  { value: 'disability_details', label: 'Disability details' },
+  { value: 'emergency_contact_name', label: 'Emergency contact name' },
+  { value: 'emergency_contact_phone', label: 'Emergency contact phone' },
+  { value: 'bank_name', label: 'Bank name' },
+  { value: 'bank_account_number', label: 'Bank account number' },
+  { value: 'bank_routing_number', label: 'Bank sort code / routing number' },
+];
 
 const MARITAL_STATUSES = ['Single', 'Married', 'Divorced', 'Widowed', 'Separated'];
 const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
@@ -29,9 +79,10 @@ const STATE_LIST = [
 export default function PersonalPage() {
   const params = useParams();
   const id = params.id as string;
-  const { can } = useAccess();
+  const { can, employeeId: myId } = useAccess();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState('');
   const [form, setForm] = useState({
     first_name: '',
     last_name: '',
@@ -63,18 +114,35 @@ export default function PersonalPage() {
     email: '',
     is_primary: false,
   });
+  const [empCustom, setEmpCustom] = useState<Record<string, unknown>>({});
+  const [contactCustom, setContactCustom] = useState<Record<string, unknown>>({});
+  const setEmpCustomValue = (fieldKey: string, value: unknown) =>
+    setEmpCustom((prev) => ({ ...prev, [fieldKey]: value }));
+  const setContactCustomValue = (fieldKey: string, value: unknown) =>
+    setContactCustom((prev) => ({ ...prev, [fieldKey]: value }));
+  const [changeOpen, setChangeOpen] = useState(false);
+  const [crField, setCrField] = useState(CHANGE_REQUEST_FIELDS[0].value);
+  const [crValue, setCrValue] = useState('');
+  const [crReason, setCrReason] = useState('');
+  const [submittingChange, setSubmittingChange] = useState(false);
+  const [myRequests, setMyRequests] = useState<ChangeRequestRow[]>([]);
 
   const canWrite = can('employees.manage');
+  const isSelf = myId === id;
+  const locked = isSelf && status === 'ACTIVE' && !canWrite;
 
   const load = useCallback(async () => {
     try {
-      const [empRes, contactRes] = await Promise.all([
+      const [empRes, contactRes, customRes] = await Promise.all([
         supabase.from('employees').select('*').eq('id', id).maybeSingle(),
         supabase.from('employee_emergency_contacts').select('*').eq('employee_id', id).order('is_primary', { ascending: false }),
+        fetchFieldValues('employee', id).catch(() => ({} as Record<string, unknown>)),
       ]);
       if (empRes.error) throw empRes.error;
+      setEmpCustom(customRes);
       if (empRes.data) {
         const d = empRes.data;
+        setStatus(d.employment_status || '');
         setForm({
           first_name: d.first_name || '',
           last_name: d.last_name || '',
@@ -109,23 +177,47 @@ export default function PersonalPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  const loadChangeRequests = useCallback(async () => {
+    if (!isSelf) return;
+    try {
+      const { data } = await supabase
+        .from('employee_change_requests')
+        .select('id, field_name, new_value, reason, status, requested_at, review_note')
+        .eq('employee_id', id)
+        .order('requested_at', { ascending: false })
+        .limit(20);
+      setMyRequests((data || []) as unknown as ChangeRequestRow[]);
+    } catch (err) {
+      console.error(err);
+    }
+  }, [isSelf, id]);
+
+  useEffect(() => { loadChangeRequests(); }, [loadChangeRequests]);
+
   const handleAddContact = async () => {
     if (!contactDraft.name.trim()) {
       toast.error('Contact name is required');
       return;
     }
     try {
-      const { error } = await supabase.from('employee_emergency_contacts').insert({
+      const { data: cRow, error } = await supabase.from('employee_emergency_contacts').insert({
         employee_id: id,
         name: contactDraft.name.trim(),
         relationship: contactDraft.relationship || null,
         phone: contactDraft.phone || null,
         email: contactDraft.email || null,
         is_primary: contactDraft.is_primary,
-      });
+      }).select().single();
       if (error) throw error;
+      const customValues = Object.fromEntries(
+        Object.entries(contactCustom).filter(([, v]) => v !== undefined && v !== null && v !== '')
+      );
+      if (Object.keys(customValues).length > 0) {
+        await saveFieldValues('employee_emergency_contacts', cRow.id as string, customValues);
+      }
       toast.success('Emergency contact added');
       setContactDraft({ name: '', relationship: '', phone: '', email: '', is_primary: false });
+      setContactCustom({});
       load();
     } catch (err) {
       toast.error('Failed to add contact: ' + (err as Error).message);
@@ -173,11 +265,44 @@ export default function PersonalPage() {
         })
         .eq('id', id);
       if (error) throw error;
+
+      const customValues = Object.fromEntries(
+        Object.entries(empCustom).filter(([, v]) => v !== undefined && v !== null && v !== '')
+      );
+      if (Object.keys(customValues).length > 0) {
+        await saveFieldValues('employee', id, customValues);
+      }
+
       toast.success('Personal information saved');
     } catch (err) {
       toast.error('Failed to save: ' + (err as Error).message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSubmitChange = async () => {
+    if (!crValue.trim()) {
+      toast.error('Please enter the new value');
+      return;
+    }
+    setSubmittingChange(true);
+    try {
+      const { error } = await supabase.rpc('submit_employee_change_request', {
+        p_field_name: crField,
+        p_new_value: crValue.trim(),
+        p_reason: crReason.trim() || null,
+      });
+      if (error) throw error;
+      toast.success('Change request submitted for HR review');
+      setChangeOpen(false);
+      setCrValue('');
+      setCrReason('');
+      loadChangeRequests();
+    } catch (err) {
+      toast.error('Failed to submit: ' + (err as Error).message);
+    } finally {
+      setSubmittingChange(false);
     }
   };
 
@@ -192,6 +317,7 @@ export default function PersonalPage() {
           <CardTitle className="text-lg">Personal Information</CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
+          <fieldset disabled={locked} className="space-y-6">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label>First Name</Label>
@@ -341,11 +467,34 @@ export default function PersonalPage() {
             </div>
           </div>
 
-          <div className="flex justify-end border-t border-border pt-4">
-            <Button onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving...' : 'Save Changes'}
-            </Button>
+          <CustomFieldsBlock
+            moduleKey="employee"
+            values={empCustom}
+            onChange={setEmpCustomValue}
+            disabled={locked}
+          />
+
+          <div className="flex items-center justify-between gap-4 border-t border-border pt-4">
+            {locked ? (
+              <>
+                <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Lock className="h-4 w-4" />
+                  Your profile is locked — request a change and HR will review it.
+                </p>
+                <Button onClick={() => setChangeOpen(true)} disabled={submittingChange}>
+                  <Send className="mr-1.5 h-4 w-4" />
+                  Request a change
+                </Button>
+              </>
+            ) : (
+              <div className="ml-auto">
+                <Button onClick={handleSave} disabled={saving}>
+                  {saving ? 'Saving...' : 'Save Changes'}
+                </Button>
+              </div>
+            )}
           </div>
+        </fieldset>
         </CardContent>
       </Card>
 
@@ -380,7 +529,7 @@ export default function PersonalPage() {
                       {[c.relationship, c.phone, c.email].filter(Boolean).join(' · ') || '—'}
                     </p>
                   </div>
-                  {canWrite && (
+                  {canWrite && !locked && (
                     <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10" onClick={() => handleDeleteContact(c.id)}>
                       <Trash2 className="h-4 w-4" />
                     </Button>
@@ -390,7 +539,7 @@ export default function PersonalPage() {
             </div>
           )}
 
-          {canWrite && (
+          {canWrite && !locked && (
             <div className="rounded-lg border border-border p-4">
               <p className="mb-3 text-sm font-medium">Add emergency contact</p>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -431,10 +580,99 @@ export default function PersonalPage() {
                   Add Contact
                 </Button>
               </div>
+              <div className="mt-4">
+                <CustomFieldsBlock
+                  moduleKey="employee_emergency_contacts"
+                  values={contactCustom}
+                  onChange={setContactCustomValue}
+                />
+              </div>
             </div>
           )}
         </CardContent>
       </Card>
+
+      {isSelf && (
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div>
+              <CardTitle className="text-lg">My Change Requests</CardTitle>
+              <p className="mt-0.5 text-sm text-muted-foreground">Track profile change requests you submitted for HR review</p>
+            </div>
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <ClipboardList className="h-4.5 w-4.5" />
+            </div>
+          </CardHeader>
+          <CardContent>
+            {myRequests.length === 0 ? (
+              <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border py-10 text-muted-foreground">
+                <ClipboardList className="mb-2 h-8 w-8 opacity-40" />
+                <p className="text-sm font-medium">No change requests yet</p>
+                <p className="text-xs">Use the “Request a change” button above when your profile is locked.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {myRequests.map((r) => (
+                  <div key={r.id} className="flex items-start justify-between gap-3 rounded-lg border border-border px-4 py-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-medium capitalize">{r.field_name.replace(/_/g, ' ')}</p>
+                        <Badge variant="outline" className={CHANGE_REQUEST_STATUS[r.status] || ''}>{r.status}</Badge>
+                      </div>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        New value: <span className="font-medium text-foreground">{String(r.new_value ?? '') || '—'}</span>
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {new Date(r.requested_at).toLocaleString()}
+                        {r.reason ? ` · “${r.reason}”` : ''}
+                        {r.review_note ? ` · Review note: ${r.review_note}` : ''}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      <Dialog open={changeOpen} onOpenChange={setChangeOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Request a profile change</DialogTitle>
+            <DialogDescription>
+              Your profile is locked because you are an active employee. Submit the change and HR will review and approve it.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label>Field</Label>
+              <Select value={crField} onValueChange={setCrField}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent className="max-h-72">
+                  {CHANGE_REQUEST_FIELDS.map((f) => (
+                    <SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>New value *</Label>
+              <Input value={crValue} onChange={(e) => setCrValue(e.target.value)} placeholder="Enter the updated value" />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Reason</Label>
+              <Textarea rows={2} value={crReason} onChange={(e) => setCrReason(e.target.value)} placeholder="Why is this changing?" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setChangeOpen(false)}>Cancel</Button>
+            <Button onClick={handleSubmitChange} disabled={submittingChange}>
+              {submittingChange ? 'Submitting...' : 'Submit request'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

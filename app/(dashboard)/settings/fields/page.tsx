@@ -21,11 +21,14 @@ const MODULES = [
   { key: 'employee_guarantor', label: 'Employee Guarantor' },
   { key: 'employee_qualifications', label: 'Employee Qualifications' },
   { key: 'employee_medical', label: 'Employee Medical' },
+  { key: 'employee_documents', label: 'Employee Documents' },
+  { key: 'employee_emergency_contacts', label: 'Employee Emergency Contacts' },
   { key: 'leave_request', label: 'Leave Request' },
   { key: 'asset', label: 'Asset' },
   { key: 'attendance', label: 'Attendance' },
   { key: 'payroll_run', label: 'Payroll Run' },
   { key: 'performance_review', label: 'Performance Review' },
+  { key: 'expense_claim', label: 'Expense Claim' },
 ];
 
 export default function FieldBuilderPage() {
