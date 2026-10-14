@@ -110,6 +110,10 @@ export function generateZodSchema(
   return z.object(shape);
 }
 
+export function isDependentField(field: { visibility?: Record<string, 'read' | 'edit' | 'hidden'> | null }): boolean {
+  return !!field.visibility && Object.keys(field.visibility).length > 0;
+}
+
 export function getFieldSections(
   fields: FieldDefinitionInput[]
 ): Map<string, FieldDefinitionInput[]> {

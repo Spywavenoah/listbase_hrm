@@ -74,6 +74,24 @@ function interpolate(template: string, variables: Record<string, string>): strin
   return template.replace(/\{\{(\w+)\}\}/g, (_, key) => variables[key] ?? "");
 }
 
+async function getBrandVariables(supabase: ReturnType<typeof createClient>): Promise<Record<string, string>> {
+  const vars: Record<string, string> = {};
+  try {
+    const { data } = await supabase
+      .from("system_settings")
+      .select("key, value")
+      .in("group_name", ["company", "branding"]);
+    for (const row of data || []) {
+      vars[row.key] = row.value === null || row.value === undefined ? "" : String(row.value);
+    }
+  } catch {
+    // Non-fatal: templates render empty brand placeholders.
+  }
+  if (!vars.company_logo_url) vars.company_logo_url = vars.logo_url || "";
+  if (!vars.app_name) vars.app_name = vars.company_name || "HR System";
+  return vars;
+}
+
 async function sendViaSmtp(
   smtp: SmtpSettings,
   to: string,
@@ -162,6 +180,8 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    const brandVars = await getBrandVariables(supabase);
+
     let sentCount = 0;
     let failedCount = 0;
     const errors: string[] = [];
@@ -178,8 +198,9 @@ Deno.serve(async (req: Request) => {
       if (notif.event_key) {
         const template = await getMailTemplate(supabase, String(notif.event_key));
         if (template) {
-          subject = interpolate(template.subject, meta);
-          bodyHtml = interpolate(template.body_html, meta);
+          const variables = { ...brandVars, ...meta };
+          subject = interpolate(template.subject, variables);
+          bodyHtml = interpolate(template.body_html, variables);
         }
       }
 

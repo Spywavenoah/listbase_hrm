@@ -22,19 +22,34 @@ interface PayComponent {
   formula: string | null;
   is_taxable: boolean;
   is_active: boolean;
+  employee_id: string | null;
 }
+
+interface EmployeeOption {
+  id: string;
+  first_name: string;
+  last_name: string;
+  employee_id: string | null;
+}
+
+const ALL_EMPLOYEES = '__all__';
 
 export default function PayComponentsPage() {
   const [components, setComponents] = useState<PayComponent[]>([]);
+  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', code: '', component_type: 'EARNING', calculation_type: 'FIXED', formula: '', is_taxable: false });
+  const [form, setForm] = useState({ name: '', code: '', component_type: 'EARNING', calculation_type: 'FIXED', formula: '', is_taxable: false, employee_id: null as string | null });
 
   const load = useCallback(async () => {
     try {
-      const { data, error } = await supabase.from('pay_components').select('*').order('component_type, name');
+      const [{ data, error }, { data: empData }] = await Promise.all([
+        supabase.from('pay_components').select('*').order('component_type, name'),
+        supabase.from('employees').select('id, first_name, last_name, employee_id').order('first_name'),
+      ]);
       if (error) throw error;
       setComponents((data || []) as unknown as PayComponent[]);
+      setEmployees((empData || []) as unknown as EmployeeOption[]);
     } catch (err) {
       console.error(err);
     } finally {
@@ -43,6 +58,12 @@ export default function PayComponentsPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const employeeName = (id: string | null) => {
+    if (!id) return 'All employees';
+    const emp = employees.find((e) => e.id === id);
+    return emp ? `${emp.first_name} ${emp.last_name}` : '—';
+  };
 
   const handleCreate = async () => {
     try {
@@ -54,11 +75,12 @@ export default function PayComponentsPage() {
         formula: form.formula || null,
         is_taxable: form.is_taxable,
         is_active: true,
+        employee_id: form.employee_id,
       });
       if (error) throw error;
       toast.success('Pay component created');
       setCreateOpen(false);
-      setForm({ name: '', code: '', component_type: 'EARNING', calculation_type: 'FIXED', formula: '', is_taxable: false });
+      setForm({ name: '', code: '', component_type: 'EARNING', calculation_type: 'FIXED', formula: '', is_taxable: false, employee_id: null });
       load();
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
@@ -87,6 +109,7 @@ export default function PayComponentsPage() {
       render: (c) => <Badge variant="outline" className={typeColors[c.component_type] || ''}>{c.component_type}</Badge>,
     },
     { key: 'calculation_type', label: 'Calculation' },
+    { key: 'employee_id', label: 'Applies To', render: (c) => employeeName(c.employee_id) },
     { key: 'formula', label: 'Formula', render: (c) => c.formula || '—' },
     {
       key: 'is_taxable', label: 'Taxable',
@@ -148,6 +171,24 @@ export default function PayComponentsPage() {
             <div className="space-y-1.5">
               <Label>Formula</Label>
               <Input value={form.formula} onChange={(e) => setForm({ ...form, formula: e.target.value })} placeholder="basic * 0.1" />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Employee</Label>
+              <Select
+                value={form.employee_id || ALL_EMPLOYEES}
+                onValueChange={(v) => setForm({ ...form, employee_id: v === ALL_EMPLOYEES ? null : v })}
+              >
+                <SelectTrigger><SelectValue placeholder="All employees" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_EMPLOYEES}>All employees (company-wide)</SelectItem>
+                  {employees.map((emp) => (
+                    <SelectItem key={emp.id} value={emp.id}>
+                      {emp.first_name} {emp.last_name}{emp.employee_id ? ` (${emp.employee_id})` : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">Leave as company-wide, or pick a single employee for a custom component.</p>
             </div>
             <div className="flex items-center gap-3">
               <Switch checked={form.is_taxable} onCheckedChange={(v) => setForm({ ...form, is_taxable: v })} />

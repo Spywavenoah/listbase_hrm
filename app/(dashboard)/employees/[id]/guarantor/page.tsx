@@ -1,10 +1,13 @@
 'use client';
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { DynamicForm } from '@/components/field-engine/dynamic-form';
 import { supabase } from '@/lib/supabase/client';
+import { useAccess } from '@/lib/access';
+import { isProfileLocked } from '@/lib/profile-lock';
+import { ProfileLockBanner } from '@/components/profile-lock-banner';
 
 const EMPTY = {
   guarantor_name: '',
@@ -19,6 +22,22 @@ const EMPTY = {
 export default function GuarantorPage() {
   const params = useParams();
   const id = params.id as string;
+  const { employeeId: myId, can } = useAccess();
+  const canWrite = can('employees.manage');
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase
+        .from('employees')
+        .select('employment_status')
+        .eq('id', id)
+        .maybeSingle();
+      setStatus(data?.employment_status ?? null);
+    })().catch(() => setStatus(null));
+  }, [id]);
+
+  const locked = isProfileLocked(myId, id, status, canWrite);
 
   const fetchSystemValues = useCallback(async (): Promise<Record<string, unknown>> => {
     const { data, error } = await supabase
@@ -84,9 +103,11 @@ export default function GuarantorPage() {
         <CardTitle className="text-lg">Guarantor Information</CardTitle>
       </CardHeader>
       <CardContent>
+        {locked && <ProfileLockBanner />}
         <DynamicForm
           moduleKey="employee_guarantor"
           recordId={id}
+          readOnly={locked}
           systemFieldDefs={[
             { key: 'guarantor_name', label: 'Guarantor Full Name', type: 'text', required: true, section: 'Guarantor Details' },
             { key: 'guarantor_relationship', label: 'Relationship to Employee', type: 'text', section: 'Guarantor Details' },

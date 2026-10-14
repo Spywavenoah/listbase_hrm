@@ -15,6 +15,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea';
 import { useAccess } from '@/lib/access';
 import { toast } from 'sonner';
+import { setWorkflowActors } from '@/lib/workflow/engine';
+import { WorkflowActorPicker } from '@/components/workflow/workflow-actor-picker';
 
 interface LeaveRequest {
   id: string;
@@ -60,6 +62,8 @@ export default function LeavePage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({ employee_id: '', leave_type_id: '', start_date: '', end_date: '', reason: '' });
   const [formError, setFormError] = useState('');
+  const [actorAuthorizer, setActorAuthorizer] = useState<string | null>(null);
+  const [actorApprover, setActorApprover] = useState<string | null>(null);
   const [approving, setApproving] = useState<string | null>(null);
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
   const [balOpen, setBalOpen] = useState(false);
@@ -147,18 +151,26 @@ export default function LeavePage() {
     const valid = await validateForm();
     if (!valid) return;
     try {
-      const { error } = await supabase.from('leave_requests').insert({
+      const { data, error } = await supabase.from('leave_requests').insert({
         employee_id: form.employee_id,
         leave_type_id: form.leave_type_id,
         start_date: form.start_date,
         end_date: form.end_date,
         reason: form.reason || null,
         status: 'PENDING',
-      });
+      }).select().single();
       if (error) throw error;
+      const created = data as unknown as LeaveRequest;
+      try {
+        await setWorkflowActors('leave', created.id, actorAuthorizer, actorApprover);
+      } catch (routingErr) {
+        console.warn('Could not set leave approval routing', routingErr);
+      }
       toast.success('Leave request submitted');
       setCreateOpen(false);
       setForm({ employee_id: '', leave_type_id: '', start_date: '', end_date: '', reason: '' });
+      setActorAuthorizer(null);
+      setActorApprover(null);
       load();
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
@@ -279,6 +291,22 @@ export default function LeavePage() {
   };
   const ltName = (id: string) => leaveTypes.find((l) => l.id === id)?.name || '—';
 
+  const formYear = form.start_date ? new Date(form.start_date).getFullYear() : new Date().getFullYear();
+  const selectedLeaveType = leaveTypes.find((l) => l.id === form.leave_type_id);
+  const formOpening = balances.find(
+    (b) => b.employee_id === form.employee_id && b.leave_type_id === form.leave_type_id && b.year === formYear
+  )?.opening_balance || 0;
+  const formUsedDays = requests
+    .filter((r) => r.employee_id === form.employee_id && r.leave_type_id === form.leave_type_id && r.status === 'APPROVED')
+    .reduce((sum, r) => sum + getDaysBetween(r.start_date, r.end_date), 0);
+  const formAllocation = (selectedLeaveType?.annual_allocation || 0) + formOpening;
+  const formOutstanding = formAllocation - formUsedDays;
+  const formRequestedDays =
+    form.start_date && form.end_date && new Date(form.end_date) >= new Date(form.start_date)
+      ? getDaysBetween(form.start_date, form.end_date)
+      : 0;
+  const showBalance = Boolean(form.employee_id && form.leave_type_id);
+
   const statusColors: Record<string, string> = {
     PENDING: 'bg-warning/10 text-warning',
     APPROVED: 'bg-success/10 text-success',
@@ -315,7 +343,7 @@ export default function LeavePage() {
         loading={loading}
         searchPlaceholder="Search leave requests..."
         createLabel="New Request"
-        onCreate={() => setCreateOpen(true)}
+        onCreate={() => { setActorAuthorizer(null); setActorApprover(null); setCreateOpen(true); }}
         toolbarActions={
           <Button size="sm" variant="outline" onClick={openBalances}>
             <Scale className="mr-2 h-4 w-4" />
@@ -371,12 +399,49 @@ export default function LeavePage() {
               <Label>Reason</Label>
               <Textarea value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} rows={2} />
             </div>
+            {showBalance && (
+              <div className="rounded-lg border border-border bg-muted/30 p-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium">Outstanding leave balance ({formYear})</p>
+                  <Badge
+                    variant="outline"
+                    className={formOutstanding < formRequestedDays ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success'}
+                  >
+                    {formOutstanding} day{formOutstanding === 1 ? '' : 's'} available
+                  </Badge>
+                </div>
+                <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-muted-foreground">
+                  <div>
+                    <p className="font-medium text-foreground">{formAllocation}</p>
+                    <p>Total allocation</p>
+                  </div>
+                  <div>
+                    <p className="font-medium text-foreground">{formUsedDays}</p>
+                    <p>Days used</p>
+                  </div>
+                  <div>
+                    <p className="font-medium text-foreground">{formRequestedDays || '—'}</p>
+                    <p>Requesting</p>
+                  </div>
+                </div>
+                {formRequestedDays > formOutstanding && (
+                  <p className="mt-2 text-xs text-destructive">
+                    This request exceeds the outstanding balance by {formRequestedDays - formOutstanding} day(s).
+                  </p>
+                )}
+              </div>
+            )}
             {formError && (
               <div className="flex items-start gap-2 rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
                 <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                 <span>{formError}</span>
               </div>
             )}
+            <WorkflowActorPicker
+              authorizerId={actorAuthorizer}
+              approverId={actorApprover}
+              onChange={(a, b) => { setActorAuthorizer(a); setActorApprover(b); }}
+            />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>

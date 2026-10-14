@@ -14,7 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from 'sonner';
 import { LineItemsEditor, type LineItem } from '@/components/shared/line-items-editor';
 import { refNumber, fmtMoney, procStatusClass, CURRENCIES } from '@/lib/procurement';
-import { startWorkflow } from '@/lib/workflow/engine';
+import { startWorkflow, setWorkflowActors } from '@/lib/workflow/engine';
+import { WorkflowSubmitDialog } from '@/components/workflow/workflow-submit-dialog';
 import { useAccess } from '@/lib/access';
 
 interface Vendor { id: string; name: string }
@@ -62,6 +63,7 @@ export default function PurchaseOrdersPage() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailItems, setDetailItems] = useState<POItem[]>([]);
   const [saving, setSaving] = useState(false);
+  const [submitTarget, setSubmitTarget] = useState<PurchaseOrder | null>(null);
 
   const [form, setForm] = useState({
     vendor_id: '',
@@ -191,7 +193,7 @@ export default function PurchaseOrdersPage() {
     }
   };
 
-  const submitOrder = async (po: PurchaseOrder) => {
+  const submitOrder = async (po: PurchaseOrder, authorizerId: string | null, approverId: string | null) => {
     try {
       const { error } = await supabase.from('purchase_orders')
         .update({ status: 'PENDING_APPROVAL' })
@@ -204,6 +206,7 @@ export default function PurchaseOrdersPage() {
         load();
         return;
       }
+      await setWorkflowActors('procurement.purchase_order', po.id, authorizerId, approverId);
       toast.success('PO submitted for approval');
       load();
     } catch (err) {
@@ -263,12 +266,12 @@ export default function PurchaseOrdersPage() {
         rowActions={(o) => (
           <div className="flex items-center gap-1">
             {o.status === 'DRAFT' && (
-              <Button size="sm" variant="ghost" onClick={() => submitOrder(o)}>
+              <Button size="sm" variant="ghost" onClick={() => setSubmitTarget(o)}>
                 <Send className="mr-1 h-3.5 w-3.5" /> Submit
               </Button>
             )}
             {o.status === 'REJECTED' && (
-              <Button size="sm" variant="ghost" onClick={() => submitOrder(o)}>
+              <Button size="sm" variant="ghost" onClick={() => setSubmitTarget(o)}>
                 Resubmit
               </Button>
             )}
@@ -445,7 +448,7 @@ export default function PurchaseOrdersPage() {
                   </div>
                 )}
                 {po.status === 'DRAFT' && (
-                  <Button onClick={() => { setDetailOpen(false); submitOrder(po); }}>
+                  <Button onClick={() => { setDetailOpen(false); setSubmitTarget(po); }}>
                     Submit for Approval
                   </Button>
                 )}
@@ -457,6 +460,14 @@ export default function PurchaseOrdersPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <WorkflowSubmitDialog
+        open={!!submitTarget}
+        onOpenChange={(o) => { if (!o) setSubmitTarget(null); }}
+        title={`Submit ${submitTarget?.po_number ?? 'purchase order'} for approval`}
+        description="Choose who authorizes and who gives final approval for this purchase order."
+        onConfirm={async (a, b) => { if (submitTarget) await submitOrder(submitTarget, a, b); setSubmitTarget(null); }}
+      />
     </>
   );
 }

@@ -5,7 +5,7 @@ import ExpenseListPage from '@/components/expenses/expense-list-page';
 export default function ExpensesPage() {
   return (
     <ExpenseListPage
-      kind="CLAIM"
+      mode="claims"
       title="Expense Claims"
       description="Submit and track expenses to be reimbursed"
       createLabel="New Expense Claim"

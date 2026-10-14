@@ -32,6 +32,8 @@ import {
 import { DynamicForm } from '@/components/field-engine/dynamic-form';
 import { supabase } from '@/lib/supabase/client';
 import { useAccess } from '@/lib/access';
+import { isProfileLocked } from '@/lib/profile-lock';
+import { ProfileLockBanner } from '@/components/profile-lock-banner';
 import { cn } from '@/lib/utils';
 
 interface HealthMetric {
@@ -81,9 +83,11 @@ export default function MedicalPage() {
   });
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
 
   const canView = id === (myId || '') || can('employees.medical');
-  const canWrite = canView;
+  const locked = isProfileLocked(myId, id, status, can('employees.medical'));
+  const canWrite = canView && !locked;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -95,6 +99,12 @@ export default function MedicalPage() {
         .order('measured_on', { ascending: true });
       if (error) throw error;
       setMetrics((data || []) as unknown as HealthMetric[]);
+      const empRes = await supabase
+        .from('employees')
+        .select('employment_status')
+        .eq('id', id)
+        .maybeSingle();
+      setStatus(empRes.data?.employment_status ?? null);
     } catch (err) {
       console.error(err);
       toast.error('Failed to load health metrics: ' + (err as Error).message);
@@ -271,9 +281,11 @@ export default function MedicalPage() {
           <CardTitle className="text-lg">Medical Records</CardTitle>
         </CardHeader>
         <CardContent>
+          {locked && <ProfileLockBanner />}
           <DynamicForm
             moduleKey="employee_medical"
             recordId={id}
+            readOnly={locked}
             systemFieldDefs={[
               { key: 'blood_group', label: 'Blood Group', type: 'select', options: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'], section: 'Medical Information' },
               { key: 'genotype', label: 'Genotype', type: 'select', options: ['AA', 'AS', 'SS', 'AC'], section: 'Medical Information' },

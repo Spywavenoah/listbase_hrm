@@ -104,6 +104,25 @@ async function getSetting(key: string, fallback: string): Promise<string> {
   return String(data.value);
 }
 
+async function getBrandVariables(): Promise<Record<string, string>> {
+  const supabase = createServerClient();
+  const vars: Record<string, string> = {};
+  try {
+    const { data } = await supabase
+      .from('system_settings')
+      .select('key, value')
+      .in('group_name', ['company', 'branding']);
+    for (const row of data || []) {
+      vars[row.key] = row.value === null || row.value === undefined ? '' : String(row.value);
+    }
+  } catch {
+    // Non-fatal: templates simply render empty brand placeholders.
+  }
+  if (!vars.company_logo_url) vars.company_logo_url = vars.logo_url || '';
+  if (!vars.app_name) vars.app_name = vars.company_name || 'HR System';
+  return vars;
+}
+
 export async function POST(request: NextRequest) {
   let body: { notification_id?: string };
   try {
@@ -122,6 +141,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ sent: 0, error: 'SMTP not configured' }, { status: 400 });
     }
 
+    const brandVars = await getBrandVariables();
+
     let sentCount = 0;
     let failedCount = 0;
     const errors: string[] = [];
@@ -136,8 +157,9 @@ export async function POST(request: NextRequest) {
       if (notif.event_key) {
         const template = await getMailTemplate(notif.event_key);
         if (template) {
-          subject = interpolate(template.subject, meta);
-          bodyHtml = interpolate(template.body_html, meta);
+          const variables = { ...brandVars, ...meta };
+          subject = interpolate(template.subject, variables);
+          bodyHtml = interpolate(template.body_html, variables);
         }
       }
 

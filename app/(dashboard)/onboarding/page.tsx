@@ -11,15 +11,6 @@ import { useAccess } from '@/lib/access';
 import { CheckCircle2, Circle, ArrowRight, PartyPopper, AlertTriangle, FileText, ClipboardList } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-const REQUIRED_PERSONAL_FIELDS: { key: string; label: string }[] = [
-  { key: 'phone', label: 'Phone number' },
-  { key: 'date_of_birth', label: 'Date of birth' },
-  { key: 'gender', label: 'Gender' },
-  { key: 'address', label: 'Address' },
-  { key: 'city', label: 'City' },
-  { key: 'emergency_contact_name', label: 'Emergency contact' },
-];
-
 interface StepState {
   key: string;
   label: string;
@@ -78,8 +69,7 @@ export default function OnboardingPage() {
 
     async function checkProgress() {
       try {
-        const [personal, employment, documents, guarantor, medical, qualifications, progress] = await Promise.all([
-          supabase.from('employees').select('phone, date_of_birth, gender, address, city, state, country, emergency_contact_name, emergency_contact_phone').eq('id', employeeId).maybeSingle(),
+        const [employment, documents, guarantor, medical, qualifications, progress] = await Promise.all([
           supabase.from('employee_employment').select('id').eq('employee_id', employeeId).maybeSingle(),
           supabase.from('employee_documents').select('id').eq('employee_id', employeeId).limit(1),
           supabase.from('employee_guarantors').select('id').eq('employee_id', employeeId).maybeSingle(),
@@ -93,8 +83,7 @@ export default function OnboardingPage() {
 
         if (!active) return;
 
-        const bio = (personal.data || {}) as Record<string, unknown>;
-        const missing = REQUIRED_PERSONAL_FIELDS.filter((f) => !bio[f.key]);
+        const missing: { key: string; label: string }[] = [];
 
         const base: StepState[] = [
           {
@@ -248,9 +237,9 @@ export default function OnboardingPage() {
   const totalCompleted = completedCount + templateCompleted;
   const progressPct = totalStepCount ? Math.round((totalCompleted / totalStepCount) * 100) : 0;
   const allDone =
-    steps.length > 0 &&
-    completedCount === steps.length &&
-    templateSteps.filter((t) => t.is_required).every((t) => t.status === 'COMPLETED');
+    templateSteps.length > 0
+      ? templateSteps.filter((t) => t.is_required).every((t) => t.status === 'COMPLETED')
+      : true;
 
   const handleFinish = async () => {
     if (!employeeId) return;

@@ -24,6 +24,13 @@ import { toast } from 'sonner';
 import { useAccess } from '@/lib/access';
 import { CustomFieldsBlock } from '@/components/field-engine/custom-fields';
 import { saveFieldValues } from '@/lib/field-engine/client';
+import {
+  setWorkflowActors,
+  getPendingWorkflowInstance,
+  approveWorkflowStep,
+  rejectWorkflowStep,
+} from '@/lib/workflow/engine';
+import { WorkflowActorPicker } from '@/components/workflow/workflow-actor-picker';
 
 const BUCKET = 'expense-proofs';
 const MAX_SIZE = 15 * 1024 * 1024;
@@ -48,7 +55,6 @@ const STATUS_LABELS: Record<string, string> = {
 interface ExpenseClaim {
   id: string;
   claim_number: string;
-  kind: 'CLAIM' | 'RETIREMENT';
   requested_by: string;
   category_id: string | null;
   amount: number;
@@ -61,6 +67,9 @@ interface ExpenseClaim {
   proof_type: string | null;
   proof_size: number | null;
   status: string;
+  actual_amount_spent: number | null;
+  amount_difference: number | null;
+  retirement_status: string;
   requested_at: string;
   created_at: string;
 }
@@ -81,20 +90,21 @@ function sanitizeFileName(name: string): string {
 }
 
 export default function ExpenseListPage({
-  kind,
+  mode = 'claims',
   title,
   description,
   createLabel,
   emptyMessage,
   emptyDescription,
 }: {
-  kind: 'CLAIM' | 'RETIREMENT';
+  mode?: 'claims' | 'retirement';
   title: string;
   description: string;
-  createLabel: string;
+  createLabel?: string;
   emptyMessage: string;
   emptyDescription: string;
 }) {
+  const isRetirement = mode === 'retirement';
   const { employee, can, canAny } = useAccess();
   const isApprover = canAny(['expense.manage', 'expense.approve']) || can('admin.settings');
 
@@ -116,6 +126,8 @@ export default function ExpenseListPage({
   });
   const [createFile, setCreateFile] = useState<File | null>(null);
   const [claimCustom, setClaimCustom] = useState<Record<string, unknown>>({});
+  const [actorAuthorizer, setActorAuthorizer] = useState<string | null>(null);
+  const [actorApprover, setActorApprover] = useState<string | null>(null);
   const setClaimCustomValue = (fieldKey: string, value: unknown) =>
     setClaimCustom((prev) => ({ ...prev, [fieldKey]: value }));
 
@@ -126,6 +138,7 @@ export default function ExpenseListPage({
 
   const [decisionTarget, setDecisionTarget] = useState<{ row: ExpenseClaim; action: 'APPROVE' | 'REJECT' | 'RETIRE' } | null>(null);
   const [decisionNote, setDecisionNote] = useState('');
+  const [decisionActual, setDecisionActual] = useState('');
   const [decisionSaving, setDecisionSaving] = useState(false);
 
   const [viewingId, setViewingId] = useState<string | null>(null);
@@ -133,8 +146,11 @@ export default function ExpenseListPage({
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      let claimQuery = supabase.from('expense_claims').select('*').eq('kind', 'CLAIM');
+      if (isRetirement) claimQuery = claimQuery.in('status', ['APPROVED', 'RETIRED']);
+      claimQuery = claimQuery.order('created_at', { ascending: false });
       const [cRes, catRes, empRes] = await Promise.all([
-        supabase.from('expense_claims').select('*').eq('kind', kind).order('created_at', { ascending: false }),
+        claimQuery,
         supabase.from('expense_categories').select('id, name').order('name'),
         supabase.rpc('get_procurement_employee_list'),
       ]);
@@ -157,13 +173,13 @@ export default function ExpenseListPage({
     } finally {
       setLoading(false);
     }
-  }, [kind, can, employee]);
+  }, [isRetirement, can, employee]);
 
   useEffect(() => { load(); }, [load]);
 
   const employeeName = (id: string) => employeeNames[id] || '—';
   const categoryName = (id: string | null) => categories.find((c) => c.id === id)?.name || '—';
-  const money = (n: number) => `₦${Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  const money = (n: number | null | undefined) => (n === null || n === undefined ? '—' : `₦${Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
   const fmtDate = (d: string | null) => (d ? new Date(d).toLocaleDateString() : '—');
 
   const openCreate = () => {
@@ -177,6 +193,8 @@ export default function ExpenseListPage({
     });
     setCreateFile(null);
     setClaimCustom({});
+    setActorAuthorizer(null);
+    setActorApprover(null);
     setCreateOpen(true);
   };
 
@@ -200,7 +218,7 @@ export default function ExpenseListPage({
       const { data, error } = await supabase
         .from('expense_claims')
         .insert({
-          kind,
+          kind: 'CLAIM',
           requested_by: requestedBy,
           category_id: form.category_id,
           amount: Number(form.amount),
@@ -212,6 +230,12 @@ export default function ExpenseListPage({
         .select().single();
       if (error) throw error;
       const row = data as unknown as ExpenseClaim;
+
+      try {
+        await setWorkflowActors('expense', row.id, actorAuthorizer, actorApprover);
+      } catch (routingErr) {
+        console.warn('Could not set expense approval routing', routingErr);
+      }
 
       if (createFile) {
         const path = `${row.id}/${sanitizeFileName(createFile.name)}`;
@@ -233,7 +257,7 @@ export default function ExpenseListPage({
         await saveFieldValues('expense_claim', row.id, customValues);
       }
 
-      toast.success(kind === 'CLAIM' ? 'Expense claim submitted' : 'Retirement statement submitted');
+      toast.success('Expense claim submitted');
       setCreateOpen(false);
       load();
     } catch (err) {
@@ -254,23 +278,61 @@ export default function ExpenseListPage({
     }
   };
 
+  const openDecision = (row: ExpenseClaim, action: 'APPROVE' | 'REJECT' | 'RETIRE') => {
+    setDecisionTarget({ row, action });
+    setDecisionNote('');
+    setDecisionActual(action === 'RETIRE' ? String(row.amount ?? '') : '');
+  };
+
   const runDecision = async () => {
     if (!decisionTarget) return;
+    const { action, row } = decisionTarget;
+    let actual: number | null = null;
+    if (action === 'RETIRE') {
+      actual = Number(decisionActual);
+      if (decisionActual === '' || Number.isNaN(actual) || actual < 0) {
+        toast.error('Enter the actual amount spent from the receipt');
+        return;
+      }
+    }
     setDecisionSaving(true);
     try {
+      // Approvals follow the workflow engine when a chain is active; fall back
+      // to the direct RPC (e.g. retirement, or a disabled chain).
+      if (action === 'APPROVE' || action === 'REJECT') {
+        let instanceId: string | null = null;
+        try {
+          instanceId = await getPendingWorkflowInstance('expense', row.id);
+        } catch {
+          instanceId = null;
+        }
+        if (instanceId) {
+          if (action === 'APPROVE') await approveWorkflowStep(instanceId, decisionNote || undefined);
+          else await rejectWorkflowStep(instanceId, decisionNote || undefined);
+          toast.success(action === 'APPROVE' ? 'Claim approved' : 'Claim rejected');
+          setDecisionTarget(null);
+          setDecisionNote('');
+          setDecisionActual('');
+          load();
+          return;
+        }
+      }
+
       const { error } = await supabase.rpc('approve_expense_claim', {
-        p_claim_id: decisionTarget.row.id,
-        p_action: decisionTarget.action,
+        p_claim_id: row.id,
+        p_action: action,
         p_note: decisionNote || null,
+        p_actual_amount: actual,
       });
       if (error) throw error;
       toast.success({
         APPROVE: 'Claim approved',
         REJECT: 'Claim rejected',
         RETIRE: 'Claim retired',
-      }[decisionTarget.action]);
+      }[action]);
       setDecisionTarget(null);
       setDecisionNote('');
+      setDecisionActual('');
       load();
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
@@ -322,19 +384,42 @@ export default function ExpenseListPage({
   const canManageSelfRow = (row: ExpenseClaim) => row.requested_by === employee?.id;
   const canAttachProof = (row: ExpenseClaim) => !row.proof_path && (isApprover || canManageSelfRow(row));
 
-  const summaryCards: SummaryCard[] = [
-    { label: 'Total', value: rows.length, icon: Receipt, color: 'primary' },
-    { label: 'Pending', value: rows.filter((r) => r.status === 'PENDING').length, icon: Clock, color: 'warning' },
-    { label: 'Approved', value: rows.filter((r) => r.status === 'APPROVED').length, icon: CheckCircle, color: 'success' },
-    { label: 'Retired', value: rows.filter((r) => r.status === 'RETIRED').length, icon: Wallet, color: 'info' },
-  ];
+  const summaryCards: SummaryCard[] = isRetirement
+    ? [
+        { label: 'Claims', value: rows.length, icon: Receipt, color: 'primary' },
+        { label: 'Awaiting clearance', value: rows.filter((r) => r.status === 'APPROVED').length, icon: Clock, color: 'warning' },
+        { label: 'Cleared', value: rows.filter((r) => r.status === 'RETIRED').length, icon: Wallet, color: 'info' },
+      ]
+    : [
+        { label: 'Total', value: rows.length, icon: Receipt, color: 'primary' },
+        { label: 'Pending', value: rows.filter((r) => r.status === 'PENDING').length, icon: Clock, color: 'warning' },
+        { label: 'Approved', value: rows.filter((r) => r.status === 'APPROVED').length, icon: CheckCircle, color: 'success' },
+        { label: 'Retired', value: rows.filter((r) => r.status === 'RETIRED').length, icon: Wallet, color: 'info' },
+      ];
 
   const columns: Column<ExpenseClaim>[] = [
     { key: 'claim_number', label: 'Ref', render: (r) => <span className="font-medium">{r.claim_number}</span>, searchText: (r) => [r.claim_number] },
     { key: 'employee', label: 'Employee', render: (r) => (canManageSelfRow(r) ? 'You' : employeeName(r.requested_by)), searchText: (r) => [canManageSelfRow(r) ? 'You' : employeeName(r.requested_by)] },
     { key: 'category', label: 'Category', render: (r) => categoryName(r.category_id) },
-    { key: 'amount', label: 'Amount', render: (r) => <span className="font-bold">{money(r.amount)}</span> },
-    { key: 'expense_date', label: 'Date', render: (r) => fmtDate(r.expense_date) },
+    { key: 'amount', label: isRetirement ? 'Claimed' : 'Amount', render: (r) => <span className="font-bold">{money(r.amount)}</span> },
+    ...(isRetirement
+      ? [
+          { key: 'actual_amount_spent', label: 'Actual spent', render: (r: ExpenseClaim) => money(r.actual_amount_spent) },
+          {
+            key: 'amount_difference',
+            label: 'Difference',
+            render: (r: ExpenseClaim) =>
+              r.amount_difference === null || r.amount_difference === undefined ? (
+                <span className="text-xs text-muted-foreground">—</span>
+              ) : (
+                <span className={r.amount_difference === 0 ? 'text-muted-foreground' : r.amount_difference > 0 ? 'text-warning' : 'text-info'}>
+                  {r.amount_difference > 0 ? 'unspent ' : 'over '}
+                  {money(Math.abs(r.amount_difference))}
+                </span>
+              ),
+          },
+        ]
+      : [{ key: 'expense_date', label: 'Date', render: (r: ExpenseClaim) => fmtDate(r.expense_date) }]),
     {
       key: 'proof', label: 'Proof',
       render: (r) => r.proof_path ? (
@@ -360,7 +445,7 @@ export default function ExpenseListPage({
         searchPlaceholder="Search..."
         statusKey="status"
         createLabel={createLabel}
-        onCreate={openCreate}
+        onCreate={isRetirement ? undefined : openCreate}
         emptyMessage={emptyMessage}
         emptyDescription={emptyDescription}
         rowActions={(r) => {
@@ -379,18 +464,18 @@ export default function ExpenseListPage({
                   {isApprover ? 'Attach proof' : 'Add proof'}
                 </Button>
               )}
-              {self && r.status === 'PENDING' && (
+              {!isRetirement && self && r.status === 'PENDING' && (
                 <Button size="sm" variant="ghost" className="h-7 text-destructive" onClick={() => cancelClaim(r)}>
                   Cancel
                 </Button>
               )}
-              {isApprover && !self && r.status === 'PENDING' && (
+              {!isRetirement && isApprover && !self && r.status === 'PENDING' && (
                 <>
                   <Button
                     size="sm"
                     variant="outline"
                     className="h-7 border-success/30 text-success hover:bg-success/10"
-                    onClick={() => { setDecisionTarget({ row: r, action: 'APPROVE' }); setDecisionNote(''); }}
+                    onClick={() => openDecision(r, 'APPROVE')}
                   >
                     Approve
                   </Button>
@@ -398,7 +483,7 @@ export default function ExpenseListPage({
                     size="sm"
                     variant="outline"
                     className="h-7 border-destructive/30 text-destructive hover:bg-destructive/10"
-                    onClick={() => { setDecisionTarget({ row: r, action: 'REJECT' }); setDecisionNote(''); }}
+                    onClick={() => openDecision(r, 'REJECT')}
                   >
                     Reject
                   </Button>
@@ -410,7 +495,7 @@ export default function ExpenseListPage({
                   variant="outline"
                   className="h-7 border-info/40 text-info hover:bg-info/10"
                   disabled={!r.proof_path}
-                  onClick={() => { setDecisionTarget({ row: r, action: 'RETIRE' }); setDecisionNote(''); }}
+                  onClick={() => openDecision(r, 'RETIRE')}
                   title={r.proof_path ? undefined : 'Attach a proof / invoice before retiring'}
                 >
                   <Wallet className="mr-1 h-3.5 w-3.5" />
@@ -425,7 +510,7 @@ export default function ExpenseListPage({
       <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) setCreateFile(null); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{createLabel}</DialogTitle>
+            <DialogTitle>{createLabel ?? 'New Expense Claim'}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
             {can('expense.manage') && (
@@ -478,6 +563,11 @@ export default function ExpenseListPage({
               <p className="text-xs text-muted-foreground">PDF, JPG, PNG — up to 15 MB. A proof must be attached before a claim can be retired.</p>
             </div>
             <CustomFieldsBlock moduleKey="expense_claim" values={claimCustom} onChange={setClaimCustomValue} />
+            <WorkflowActorPicker
+              authorizerId={actorAuthorizer}
+              approverId={actorApprover}
+              onChange={(a, b) => { setActorAuthorizer(a); setActorApprover(b); }}
+            />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={saving}>Cancel</Button>
@@ -497,7 +587,7 @@ export default function ExpenseListPage({
           <div className="space-y-4 py-4">
             <p className="text-sm text-muted-foreground">
               Attach the receipt or invoice for <strong>#{proofTarget?.claim_number}</strong>. This evidence is required
-              before the {kind === 'CLAIM' ? 'claim' : 'retirement'} can be cleared.
+              before the claim can be cleared.
             </p>
             <div className="space-y-1.5">
               <Label>File (PDF, JPEG, PNG) *</Label>
@@ -533,13 +623,13 @@ export default function ExpenseListPage({
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={!!decisionTarget} onOpenChange={(open) => { if (!open && !decisionSaving) { setDecisionTarget(null); setDecisionNote(''); } }}>
+      <AlertDialog open={!!decisionTarget} onOpenChange={(open) => { if (!open && !decisionSaving) { setDecisionTarget(null); setDecisionNote(''); setDecisionActual(''); } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
               {decisionTarget?.action === 'APPROVE' && 'Approve expense?'}
               {decisionTarget?.action === 'REJECT' && 'Reject expense?'}
-              {decisionTarget?.action === 'RETIRE' && 'Clear / retire this expense?'}
+              {decisionTarget?.action === 'RETIRE' && 'Retire / clear this expense?'}
             </AlertDialogTitle>
             <AlertDialogDescription>
               {decisionTarget && (
@@ -553,15 +643,38 @@ export default function ExpenseListPage({
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="space-y-1.5">
-            <Label htmlFor="decision-note">Note (optional)</Label>
-            <Textarea
-              id="decision-note"
-              value={decisionNote}
-              onChange={(e) => setDecisionNote(e.target.value)}
-              placeholder={decisionTarget?.action === 'REJECT' ? 'Reason for rejection...' : 'Add a note for the requester...'}
-              rows={3}
-            />
+          <div className="space-y-3">
+            {decisionTarget?.action === 'RETIRE' && (
+              <div className="space-y-1.5">
+                <Label htmlFor="decision-actual">Actual amount spent (from receipt) *</Label>
+                <Input
+                  id="decision-actual"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={decisionActual}
+                  onChange={(e) => setDecisionActual(e.target.value)}
+                  placeholder="0.00"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Difference vs claimed:{' '}
+                  <strong className={Number(decisionActual || 0) > Number(decisionTarget.row.amount) ? 'text-info' : 'text-warning'}>
+                    {money(Number(decisionTarget.row.amount) - Number(decisionActual || 0))}
+                  </strong>
+                  {Number(decisionActual || 0) > Number(decisionTarget.row.amount) && ' (over-spend)'}
+                </p>
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <Label htmlFor="decision-note">Note (optional)</Label>
+              <Textarea
+                id="decision-note"
+                value={decisionNote}
+                onChange={(e) => setDecisionNote(e.target.value)}
+                placeholder={decisionTarget?.action === 'REJECT' ? 'Reason for rejection...' : 'Add a note for the requester...'}
+                rows={3}
+              />
+            </div>
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={decisionSaving}>Cancel</AlertDialogCancel>

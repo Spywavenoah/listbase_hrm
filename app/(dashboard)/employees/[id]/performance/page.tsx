@@ -62,42 +62,71 @@ export default function PerformancePage() {
     COMPLETED: 'bg-success/10 text-success',
   };
 
+  const pending = reviews.filter((r) => r.status !== 'COMPLETED');
+  const completed = reviews.filter((r) => r.status === 'COMPLETED');
+
+  const renderReview = (review: Review) => (
+    <div key={review.id} className="rounded-lg border border-border p-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="font-medium">{review.review_cycle}</p>
+          {review.rating && (
+            <p className="text-sm text-muted-foreground mt-0.5">Rating: {ratingText(review.rating)}</p>
+          )}
+        </div>
+        <Badge variant="outline" className={statusColors[review.status] || ''}>
+          {review.status}
+        </Badge>
+      </div>
+      {review.feedback && (
+        <p className="mt-2 text-sm text-muted-foreground">{review.feedback}</p>
+      )}
+    </div>
+  );
+
   return (
-    <Card className="animate-fade-in">
-      <CardHeader>
-        <CardTitle className="text-lg">Performance Reviews</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {loading ? (
-          <div className="h-32 animate-pulse rounded-lg bg-muted" />
-        ) : reviews.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-            <Target className="h-10 w-10 mb-2 opacity-50" />
-            <p className="text-sm">No performance reviews yet.</p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {reviews.map((review) => (
-              <div key={review.id} className="rounded-lg border border-border p-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-medium">{review.review_cycle}</p>
-                    {review.rating && (
-                      <p className="text-sm text-muted-foreground mt-0.5">Rating: {ratingText(review.rating)}</p>
-                    )}
-                  </div>
-                  <Badge variant="outline" className={statusColors[review.status] || ''}>
-                    {review.status}
-                  </Badge>
-                </div>
-                {review.feedback && (
-                  <p className="mt-2 text-sm text-muted-foreground">{review.feedback}</p>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+    <div className="space-y-6 animate-fade-in">
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <CardTitle className="text-lg">Pending Appraisals</CardTitle>
+          <Badge variant="outline" className={pending.length ? 'bg-warning/10 text-warning border-warning/20' : 'text-muted-foreground'}>
+            {pending.length}
+          </Badge>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <div className="h-32 animate-pulse rounded-lg bg-muted" />
+          ) : pending.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+              <Target className="h-8 w-8 mb-2 opacity-50" />
+              <p className="text-sm">No pending appraisals.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">{pending.map(renderReview)}</div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <CardTitle className="text-lg">Completed Appraisals</CardTitle>
+          <Badge variant="outline" className={completed.length ? 'bg-success/10 text-success border-success/20' : 'text-muted-foreground'}>
+            {completed.length}
+          </Badge>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <div className="h-32 animate-pulse rounded-lg bg-muted" />
+          ) : completed.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+              <Target className="h-8 w-8 mb-2 opacity-50" />
+              <p className="text-sm">No completed appraisals yet.</p>
+            </div>
+          ) : (
+            <div className="space-y-3">{completed.map(renderReview)}</div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }

@@ -10,6 +10,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { supabase } from '@/lib/supabase/client';
 import { toast } from 'sonner';
 import { useAccess } from '@/lib/access';
+import { isProfileLocked } from '@/lib/profile-lock';
+import { ProfileLockBanner } from '@/components/profile-lock-banner';
+import { CustomFieldsBlock } from '@/components/field-engine/custom-fields';
+import { fetchFieldValues, saveFieldValues } from '@/lib/field-engine/client';
 import type { GradeLevel } from '@/lib/types';
 
 const STAFF_CATEGORIES = ['EXECUTIVE', 'MANAGEMENT', 'SENIOR_STAFF', 'JUNIOR_STAFF', 'CONTRACT', 'INTERN', 'ADVISOR'];
@@ -18,13 +22,14 @@ const CONTRACT_TYPES = ['PERMANENT', 'CONTRACT', 'PROBATION', 'CASUAL', 'INTERN'
 export default function EmploymentPage() {
   const params = useParams();
   const id = params.id as string;
-  const { can } = useAccess();
+  const { employeeId: myId, can } = useAccess();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
   const [positions, setPositions] = useState<{ id: string; title: string }[]>([]);
   const [managers, setManagers] = useState<{ id: string; first_name: string; last_name: string }[]>([]);
   const [grades, setGrades] = useState<GradeLevel[]>([]);
+  const [shifts, setShifts] = useState<{ id: string; name: string; start_time: string; end_time: string }[]>([]);
   const [form, setForm] = useState({
     employment_type: 'FULL_TIME',
     employment_status: 'PENDING_VERIFICATION',
@@ -39,19 +44,29 @@ export default function EmploymentPage() {
     department_id: '',
     reporting_manager_id: '',
     compensation_grade: '',
+    shift_id: '',
   });
+  const [empCustom, setEmpCustom] = useState<Record<string, unknown>>({});
+  const setEmpCustomValue = (fieldKey: string, value: unknown) =>
+    setEmpCustom((prev) => ({ ...prev, [fieldKey]: value }));
 
   const canWrite = can('employees.manage');
+  const locked = isProfileLocked(myId, id, form.employment_status, canWrite);
 
   const load = useCallback(async () => {
     try {
-      const [empRes, deptRes, posRes, mgrRes, gradeRes] = await Promise.all([
+      const [empRes, deptRes, posRes, mgrRes, gradeRes, shiftRes, customRes] = await Promise.all([
         supabase.from('employees').select('*').eq('id', id).maybeSingle(),
         supabase.from('departments').select('id, name').eq('is_active', true),
         supabase.from('positions').select('id, title'),
         supabase.from('employees').select('id, first_name, last_name').neq('id', id),
         supabase.from('grade_levels').select('*').eq('is_active', true).order('sort_order', { ascending: true }),
+        supabase.from('shifts').select('id, name, start_time, end_time').eq('is_active', true).order('name'),
+        fetchFieldValues('employee', id).catch(() => ({} as Record<string, unknown>)),
       ]);
+
+      setEmpCustom(customRes);
+      setShifts((shiftRes.data || []) as unknown as { id: string; name: string; start_time: string; end_time: string }[]);
 
       if (empRes.data) {
         setForm({
@@ -68,6 +83,7 @@ export default function EmploymentPage() {
           department_id: empRes.data.department_id || '',
           reporting_manager_id: empRes.data.reporting_manager_id || '',
           compensation_grade: empRes.data.compensation_grade || '',
+          shift_id: empRes.data.shift_id || '',
         });
       }
       setDepartments(deptRes.data || []);
@@ -101,12 +117,21 @@ export default function EmploymentPage() {
           position_id: form.position_id || null,
           department_id: form.department_id || null,
           reporting_manager_id: form.reporting_manager_id || null,
+          shift_id: form.shift_id || null,
           compensation_grade: form.grade_level_id
             ? grades.find((g) => g.id === form.grade_level_id)?.name || form.compensation_grade
             : null,
         })
         .eq('id', id);
       if (error) throw error;
+
+      const customValues = Object.fromEntries(
+        Object.entries(empCustom).filter(([, v]) => v !== undefined && v !== null && v !== '')
+      );
+      if (Object.keys(customValues).length > 0) {
+        await saveFieldValues('employee', id, customValues);
+      }
+
       toast.success('Employment information saved');
       load();
     } catch (err) {
@@ -124,6 +149,8 @@ export default function EmploymentPage() {
         <CardTitle className="text-lg">Employment Details</CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
+        {locked && <ProfileLockBanner />}
+        <fieldset disabled={locked} className="space-y-6">
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label>Employment Type</Label>
@@ -251,11 +278,35 @@ export default function EmploymentPage() {
           </Select>
         </div>
 
-        <div className="flex justify-end border-t border-border pt-4">
-          <Button onClick={handleSave} disabled={saving || !canWrite}>
-            {saving ? 'Saving...' : 'Save Changes'}
-          </Button>
+        <div className="space-y-1.5">
+          <Label>Shift</Label>
+          <Select value={form.shift_id} onValueChange={(v) => setForm({ ...form, shift_id: v })}>
+            <SelectTrigger><SelectValue placeholder="Select shift" /></SelectTrigger>
+            <SelectContent>
+              {shifts.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {s.name} ({s.start_time.slice(0, 5)} - {s.end_time.slice(0, 5)})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
+
+        <CustomFieldsBlock
+          moduleKey="employee"
+          values={empCustom}
+          onChange={setEmpCustomValue}
+          disabled={locked}
+        />
+
+        {!locked && (
+          <div className="flex justify-end border-t border-border pt-4">
+            <Button onClick={handleSave} disabled={saving || !canWrite}>
+              {saving ? 'Saving...' : 'Save Changes'}
+            </Button>
+          </div>
+        )}
+        </fieldset>
       </CardContent>
     </Card>
   );

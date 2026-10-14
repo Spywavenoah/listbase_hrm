@@ -21,6 +21,8 @@ import {
   Clock,
   ChevronLeft,
   LogOut,
+  MessageSquare,
+  ListChecks,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -41,6 +43,8 @@ const submenus: SubmenuItem[] = [
   { label: 'Compensation', href: 'compensation', icon: Wallet },
   { label: 'Documents', href: 'documents', icon: FileText },
   { label: 'Performance', href: 'performance', icon: Target },
+  { label: 'Queries', href: 'queries', icon: MessageSquare },
+  { label: 'Tasks', href: 'tasks', icon: ListChecks },
   { label: 'Training', href: 'training', icon: GraduationCap },
   { label: 'Leave', href: 'leave', icon: CalendarDays },
   { label: 'Assets', href: 'assets', icon: Package },

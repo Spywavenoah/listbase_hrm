@@ -5,12 +5,11 @@ import ExpenseListPage from '@/components/expenses/expense-list-page';
 export default function ExpenseRetirementPage() {
   return (
     <ExpenseListPage
-      kind="RETIREMENT"
-      title="Expense Retirements"
-      description="Retire impress advances with proof of spending"
-      createLabel="New Retirement"
-      emptyMessage="No retirements yet"
-      emptyDescription="Retirement statements you submit (or ones awaiting your approval) will appear here."
+      mode="retirement"
+      title="Expense Retirement"
+      description="Clear approved expense claims by recording the actual amount spent from the receipt"
+      emptyMessage="Nothing to retire yet"
+      emptyDescription="Approved claims awaiting clearance (and cleared claims) will appear here."
     />
   );
 }

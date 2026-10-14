@@ -13,7 +13,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
 import { refNumber, fmtMoney, procStatusClass } from '@/lib/procurement';
-import { startWorkflow } from '@/lib/workflow/engine';
+import { startWorkflow, setWorkflowActors } from '@/lib/workflow/engine';
+import { WorkflowActorPicker } from '@/components/workflow/workflow-actor-picker';
 import { useAccess } from '@/lib/access';
 
 interface Payment {
@@ -59,6 +60,8 @@ export default function PaymentsPage() {
   const [payOpen, setPayOpen] = useState<Payment | null>(null);
   const [paymentReference, setPaymentReference] = useState('');
   const [saving, setSaving] = useState(false);
+  const [actorAuthorizer, setActorAuthorizer] = useState<string | null>(null);
+  const [actorApprover, setActorApprover] = useState<string | null>(null);
 
   const [form, setForm] = useState({
     invoice_id: '',
@@ -104,6 +107,8 @@ export default function PaymentsPage() {
 
   const resetForm = () => {
     setForm({ invoice_id: '', payment_method: 'BANK_TRANSFER', amount: '', notes: '' });
+    setActorAuthorizer(null);
+    setActorApprover(null);
   };
 
   const handleCreate = async () => {
@@ -148,7 +153,10 @@ export default function PaymentsPage() {
       });
       if (error) throw error;
       const { data: pr } = await supabase.from('procurement_payment_requests').select('id').eq('payment_ref', paymentRef).single();
-      if (pr) await startWorkflow('procurement.payment', (pr as { id: string }).id, employee?.id);
+      if (pr) {
+        await startWorkflow('procurement.payment', (pr as { id: string }).id, employee?.id);
+        await setWorkflowActors('procurement.payment', (pr as { id: string }).id, actorAuthorizer, actorApprover);
+      }
       toast.success(`Payment request ${paymentRef} created for approval`);
       setCreateOpen(false);
       resetForm();
@@ -277,6 +285,11 @@ export default function PaymentsPage() {
               <Label>Notes</Label>
               <Textarea rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
             </div>
+            <WorkflowActorPicker
+              authorizerId={actorAuthorizer}
+              approverId={actorApprover}
+              onChange={(a, b) => { setActorAuthorizer(a); setActorApprover(b); }}
+            />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>

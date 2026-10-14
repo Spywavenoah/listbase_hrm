@@ -88,6 +88,8 @@ export interface Employee {
   retirement_date: string | null;
   is_2fa_enabled: boolean;
   is_login_blocked: boolean;
+  disabled_reason?: string | null;
+  employment_status_before_disable?: string | null;
   role: string;
   password_updated_at: string | null;
   created_at: string;

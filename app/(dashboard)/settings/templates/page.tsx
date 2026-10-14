@@ -9,7 +9,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { supabase } from '@/lib/supabase/client';
 import { toast } from 'sonner';
-import { Plus, Pencil, Trash2, Mail } from 'lucide-react';
+import { Plus, Pencil, Trash2, Mail, Eye } from 'lucide-react';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
@@ -31,6 +31,8 @@ const EVENT_KEYS = [
   'leave.approved',
   'leave.rejected',
   'payroll.payslip_ready',
+  'performance.appraisal',
+  'general.notification',
   'exit.clearance',
   'invoice.receipt',
 ];
@@ -41,6 +43,7 @@ export default function MailTemplatesPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState<Template | null>(null);
   const [form, setForm] = useState({ event_key: '', subject: '', body_html: '', variables: [] as string[] });
+  const [preview, setPreview] = useState<Template | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -105,6 +108,33 @@ export default function MailTemplatesPage() {
     }
   };
 
+  const SAMPLE_VARIABLES: Record<string, string> = {
+    first_name: 'Ada',
+    last_name: 'Okonkwo',
+    employee_name: 'Ada Okonkwo',
+    employee_email: 'ada.okonkwo@example.com',
+    approver_name: 'Noah Linus',
+    company_name: 'Example Systems Ltd',
+    app_name: 'HRM Flow',
+    reset_link: 'https://app.example.com/setup-account?token=sample',
+    setup_link: 'https://app.example.com/setup-account?token=sample',
+    payslip_period: 'Sep 2026',
+    amount: 'NGN 1,250,000.00',
+    request_type: 'Annual Leave',
+    leave_balance: '12 days',
+    invoice_number: 'INV-000123',
+    exit_reason: 'Resignation',
+    appraisal_period: 'Q3 2026',
+  };
+
+  const renderPreview = (template: Template) => {
+    const subject = template.subject.replace(/\{\{(\w+)\}\}/g, (_, key: string) => SAMPLE_VARIABLES[key] ?? '');
+    const body = template.body_html
+      .replace(/\{\{(\w+)\}\}/g, (_, key: string) => SAMPLE_VARIABLES[key] ?? '')
+      .replace(/<a[^>]*href="([^"]+)"[^>]*>.*?<\/a>/gs, '<a href="$1">$1</a>');
+    return { subject, body };
+  };
+
   return (
     <div className="space-y-6 animate-fade-in">
       <div className="flex items-center justify-between">
@@ -140,6 +170,9 @@ export default function MailTemplatesPage() {
                   <Badge variant="outline" className={t.is_active ? 'bg-success/10 text-success' : ''}>
                     {t.is_active ? 'Active' : 'Inactive'}
                   </Badge>
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setPreview(t)} title="Preview">
+                    <Eye className="h-4 w-4" />
+                  </Button>
                   <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(t)}>
                     <Pencil className="h-4 w-4" />
                   </Button>
@@ -196,6 +229,26 @@ export default function MailTemplatesPage() {
             <Button onClick={handleSave} disabled={!form.event_key || !form.subject}>
               {editing ? 'Update' : 'Create'}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    <Dialog open={!!preview} onOpenChange={(open) => { if (!open) setPreview(null); }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle>
+              {preview ? `${preview.event_key} — ${renderPreview(preview).subject || 'Preview'}` : 'Preview'}
+            </DialogTitle>
+          </DialogHeader>
+          {preview && (
+            <iframe
+              title="Email preview"
+              className="min-h-[55vh] w-full flex-1 rounded-lg border border-border bg-white"
+              sandbox=""
+              srcDoc={`<html><body style="margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;">${renderPreview(preview).body}</body></html>`}
+            />
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPreview(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

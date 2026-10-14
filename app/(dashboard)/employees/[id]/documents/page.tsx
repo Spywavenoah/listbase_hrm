@@ -16,6 +16,11 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
+import { useAccess } from '@/lib/access';
+import { isProfileLocked } from '@/lib/profile-lock';
+import { ProfileLockBanner } from '@/components/profile-lock-banner';
+import { CustomFieldsBlock } from '@/components/field-engine/custom-fields';
+import { saveFieldValues } from '@/lib/field-engine/client';
 
 const BUCKET = 'employee-documents';
 const MAX_SIZE = 15 * 1024 * 1024; // 15 MB (matches bucket file_size_limit)
@@ -50,9 +55,12 @@ function sanitizeFileName(name: string): string {
 export default function DocumentsPage() {
   const params = useParams();
   const id = params.id as string;
+  const { employeeId: myId, can } = useAccess();
+  const canWrite = can('employees.manage') || can('employees.invite');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [docs, setDocs] = useState<Doc[]>([]);
   const [loading, setLoading] = useState(true);
+  const [status, setStatus] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [viewingId, setViewingId] = useState<string | null>(null);
@@ -63,6 +71,9 @@ export default function DocumentsPage() {
   });
   const [file, setFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
+  const [docCustom, setDocCustom] = useState<Record<string, unknown>>({});
+  const setDocCustomValue = (fieldKey: string, value: unknown) =>
+    setDocCustom((prev) => ({ ...prev, [fieldKey]: value }));
 
   const loadDocs = useCallback(async () => {
     try {
@@ -81,6 +92,19 @@ export default function DocumentsPage() {
   }, [id]);
 
   useEffect(() => { loadDocs(); }, [loadDocs]);
+
+  const locked = isProfileLocked(myId, id, status, canWrite);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase
+        .from('employees')
+        .select('employment_status')
+        .eq('id', id)
+        .maybeSingle();
+      setStatus(data?.employment_status ?? null);
+    })().catch(() => setStatus(null));
+  }, [id]);
 
   const handleFileChange = (selected: File | null) => {
     setFile(null);
@@ -117,7 +141,7 @@ export default function DocumentsPage() {
         });
       if (uploadError) throw uploadError;
 
-      const { error } = await supabase.from('employee_documents').insert({
+      const { data: docRow, error } = await supabase.from('employee_documents').insert({
         employee_id: id,
         title: newDoc.title,
         document_type: newDoc.document_type || null,
@@ -126,12 +150,20 @@ export default function DocumentsPage() {
         file_type: file.type,
         file_size: file.size,
         expiry_date: newDoc.expiry_date || null,
-      });
+      }).select().single();
       if (error) throw error;
+
+      const customValues = Object.fromEntries(
+        Object.entries(docCustom).filter(([, v]) => v !== undefined && v !== null && v !== '')
+      );
+      if (Object.keys(customValues).length > 0) {
+        await saveFieldValues('employee_documents', docRow.id as string, customValues);
+      }
 
       toast.success('Document uploaded');
       setAddOpen(false);
       setNewDoc({ title: '', document_type: '', expiry_date: '' });
+      setDocCustom({});
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
       loadDocs();
@@ -196,11 +228,14 @@ export default function DocumentsPage() {
     <Card className="animate-fade-in">
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle className="text-lg">Documents</CardTitle>
-        <Button size="sm" onClick={() => setAddOpen(true)}>
-          <Plus className="mr-2 h-4 w-4" /> Add Document
-        </Button>
+        {!locked && (
+          <Button size="sm" onClick={() => setAddOpen(true)}>
+            <Plus className="mr-2 h-4 w-4" /> Add Document
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
+        {locked && <ProfileLockBanner />}
         {loading ? (
           <div className="h-32 animate-pulse rounded-lg bg-muted" />
         ) : docs.length === 0 ? (
@@ -247,16 +282,18 @@ export default function DocumentsPage() {
                     View
                   </Button>
                 )}
+                {!locked && (
                 <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleDelete(doc)}>
                   <Trash2 className="h-4 w-4" />
                 </Button>
+              )}
               </div>
             ))}
           </div>
         )}
       </CardContent>
 
-      <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) setFile(null); }}>
+      <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) { setFile(null); setDocCustom({}); } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add Document</DialogTitle>
@@ -304,6 +341,11 @@ export default function DocumentsPage() {
               <Label>Expiry Date</Label>
               <Input type="date" value={newDoc.expiry_date} onChange={(e) => setNewDoc({ ...newDoc, expiry_date: e.target.value })} />
             </div>
+            <CustomFieldsBlock
+              moduleKey="employee_documents"
+              values={docCustom}
+              onChange={setDocCustomValue}
+            />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAddOpen(false)} disabled={uploading}>Cancel</Button>

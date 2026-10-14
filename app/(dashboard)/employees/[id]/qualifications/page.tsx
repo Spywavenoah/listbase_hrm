@@ -1,10 +1,13 @@
 'use client';
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { DynamicForm } from '@/components/field-engine/dynamic-form';
 import { supabase } from '@/lib/supabase/client';
+import { useAccess } from '@/lib/access';
+import { isProfileLocked } from '@/lib/profile-lock';
+import { ProfileLockBanner } from '@/components/profile-lock-banner';
 
 const EMPTY = {
   highest_qualification: '',
@@ -17,6 +20,22 @@ const EMPTY = {
 export default function QualificationsPage() {
   const params = useParams();
   const id = params.id as string;
+  const { employeeId: myId, can } = useAccess();
+  const canWrite = can('employees.manage');
+  const [status, setStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase
+        .from('employees')
+        .select('employment_status')
+        .eq('id', id)
+        .maybeSingle();
+      setStatus(data?.employment_status ?? null);
+    })().catch(() => setStatus(null));
+  }, [id]);
+
+  const locked = isProfileLocked(myId, id, status, canWrite);
 
   const fetchSystemValues = useCallback(async (): Promise<Record<string, unknown>> => {
     const { data, error } = await supabase
@@ -86,9 +105,11 @@ export default function QualificationsPage() {
         <CardTitle className="text-lg">Qualifications & Education</CardTitle>
       </CardHeader>
       <CardContent>
+        {locked && <ProfileLockBanner />}
         <DynamicForm
           moduleKey="employee_qualifications"
           recordId={id}
+          readOnly={locked}
           systemFieldDefs={[
             { key: 'highest_qualification', label: 'Highest Qualification', type: 'text', section: 'Education' },
             { key: 'institution', label: 'Institution', type: 'text', section: 'Education' },

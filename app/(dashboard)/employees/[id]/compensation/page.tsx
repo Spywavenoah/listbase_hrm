@@ -11,6 +11,8 @@ import { supabase } from '@/lib/supabase/client';
 import { toast } from 'sonner';
 import type { GradeLevel, EmployeeHistoryEntry } from '@/lib/types';
 import { useAccess } from '@/lib/access';
+import { isProfileLocked } from '@/lib/profile-lock';
+import { ProfileLockBanner } from '@/components/profile-lock-banner';
 
 const EVENT_COLORS: Record<string, string> = {
   SALARY_CHANGE: 'bg-success/10 text-success',
@@ -24,9 +26,10 @@ const EVENT_COLORS: Record<string, string> = {
 export default function CompensationPage() {
   const params = useParams();
   const id = params.id as string;
-  const { can } = useAccess();
+  const { employeeId: myId, can } = useAccess();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const [grades, setGrades] = useState<GradeLevel[]>([]);
   const [history, setHistory] = useState<EmployeeHistoryEntry[]>([]);
   const [form, setForm] = useState({
@@ -39,16 +42,18 @@ export default function CompensationPage() {
   });
 
   const canWrite = can('employees.manage');
+  const locked = isProfileLocked(myId, id, status, canWrite);
 
   const load = useCallback(async () => {
     try {
       const [empRes, gradeRes, histRes] = await Promise.all([
-        supabase.from('employees').select('compensation_grade, monthly_salary, grade_level_id, bank_name, bank_account_number, bank_routing_number').eq('id', id).maybeSingle(),
+        supabase.from('employees').select('compensation_grade, monthly_salary, grade_level_id, bank_name, bank_account_number, bank_routing_number, employment_status').eq('id', id).maybeSingle(),
         supabase.from('grade_levels').select('*').eq('is_active', true).order('sort_order', { ascending: true }),
         supabase.from('employee_history').select('*').eq('employee_id', id).order('created_at', { ascending: false }).limit(20),
       ]);
       if (empRes.error) throw empRes.error;
       if (empRes.data) {
+        setStatus(empRes.data.employment_status ?? null);
         setForm({
           grade_level_id: empRes.data.grade_level_id || '',
           compensation_grade: empRes.data.compensation_grade || '',
@@ -103,6 +108,8 @@ export default function CompensationPage() {
           <CardTitle className="text-lg">Compensation & Banking</CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
+          {locked && <ProfileLockBanner />}
+          <fieldset disabled={locked} className="space-y-6">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label>Grade Level</Label>
@@ -150,11 +157,14 @@ export default function CompensationPage() {
             </div>
           </div>
 
-          <div className="flex justify-end border-t border-border pt-4">
-            <Button onClick={handleSave} disabled={saving || !canWrite}>
-              {saving ? 'Saving...' : 'Save Changes'}
-            </Button>
-          </div>
+          {!locked && (
+            <div className="flex justify-end border-t border-border pt-4">
+              <Button onClick={handleSave} disabled={saving || !canWrite}>
+                {saving ? 'Saving...' : 'Save Changes'}
+              </Button>
+            </div>
+          )}
+          </fieldset>
         </CardContent>
       </Card>
 

@@ -14,7 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from 'sonner';
 import { LineItemsEditor, type LineItem } from '@/components/shared/line-items-editor';
 import { refNumber, fmtMoney, procStatusClass, CURRENCIES } from '@/lib/procurement';
-import { startWorkflow } from '@/lib/workflow/engine';
+import { startWorkflow, setWorkflowActors } from '@/lib/workflow/engine';
+import { WorkflowSubmitDialog } from '@/components/workflow/workflow-submit-dialog';
 import { useAccess } from '@/lib/access';
 
 interface Invoice {
@@ -63,6 +64,7 @@ export default function InvoicesPage() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [submitTarget, setSubmitTarget] = useState<Invoice | null>(null);
 
   const [form, setForm] = useState({
     vendor_id: '',
@@ -198,7 +200,7 @@ export default function InvoicesPage() {
     }
   };
 
-  const submitInvoice = async (inv: Invoice) => {
+  const submitInvoice = async (inv: Invoice, authorizerId: string | null, approverId: string | null) => {
     const previousStatus = inv.status === 'REJECTED' ? 'VERIFIED' : inv.status;
     try {
       const { error } = await supabase.from('procurement_invoices')
@@ -214,6 +216,7 @@ export default function InvoicesPage() {
         load();
         return;
       }
+      await setWorkflowActors('procurement.invoice', inv.id, authorizerId, approverId);
       toast.success('Invoice submitted for approval');
       load();
     } catch (err) {
@@ -284,7 +287,7 @@ export default function InvoicesPage() {
         rowActions={(r) => (
           <div className="flex items-center gap-1">
             {(r.status === 'VERIFIED' || r.status === 'REGISTERED' || r.status === 'REJECTED') && (
-              <Button size="sm" variant="ghost" onClick={() => submitInvoice(r)}>
+              <Button size="sm" variant="ghost" onClick={() => setSubmitTarget(r)}>
                 <Send className="mr-1 h-3.5 w-3.5" /> {r.status === 'REJECTED' ? 'Resubmit' : 'Submit'}
               </Button>
             )}
@@ -463,6 +466,14 @@ export default function InvoicesPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <WorkflowSubmitDialog
+        open={!!submitTarget}
+        onOpenChange={(o) => { if (!o) setSubmitTarget(null); }}
+        title={`Submit ${submitTarget?.invoice_number ?? 'invoice'} for approval`}
+        description="Choose who authorizes and who gives final approval for this invoice."
+        onConfirm={async (a, b) => { if (submitTarget) await submitInvoice(submitTarget, a, b); setSubmitTarget(null); }}
+      />
     </>
   );
 }

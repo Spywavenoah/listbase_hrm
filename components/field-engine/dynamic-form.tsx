@@ -5,7 +5,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { supabase } from '@/lib/supabase/client';
 import { fetchFieldDefinitions, fetchFieldValues, saveFieldValues } from '@/lib/field-engine/client';
-import { generateZodSchema, getFieldSections, type FieldDefinitionInput } from '@/lib/field-engine/types';
+import { generateZodSchema, getFieldSections, isDependentField, type FieldDefinitionInput } from '@/lib/field-engine/types';
 import type { FieldDataType } from '@/lib/types';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -35,6 +35,7 @@ interface DynamicFormProps {
   onSubmitSystem?: (data: Record<string, unknown>) => Promise<void>;
   fetchSystemValues?: () => Promise<Record<string, unknown>>;
   submitLabel?: string;
+  readOnly?: boolean;
 }
 
 export function DynamicForm({
@@ -45,6 +46,7 @@ export function DynamicForm({
   onSubmitSystem,
   fetchSystemValues,
   submitLabel = 'Save',
+  readOnly = false,
 }: DynamicFormProps) {
   const [customFields, setCustomFields] = useState<FieldDefinitionInput[]>([]);
   const [loading, setLoading] = useState(true);
@@ -86,7 +88,7 @@ export function DynamicForm({
     try {
       setLoading(true);
       const fields = await fetchFieldDefinitions(moduleKey);
-      setCustomFields(fields as unknown as FieldDefinitionInput[]);
+      setCustomFields(fields.filter((f) => !isDependentField(f)) as unknown as FieldDefinitionInput[]);
 
       const { fetchSystemValues: fetchSystem, systemFields: staticValues } = systemPropsRef.current;
       const systemValues = fetchSystem ? await fetchSystem() : staticValues || {};
@@ -109,6 +111,7 @@ export function DynamicForm({
   }, [loadCustomFields]);
 
   const onSubmit = async (data: Record<string, unknown>) => {
+    if (readOnly) return;
     setSaving(true);
     try {
       if (onSubmitSystem) {
@@ -160,17 +163,20 @@ export function DynamicForm({
                 key={field.field_key}
                 field={field}
                 form={form}
+                disabled={readOnly}
               />
             ))}
           </div>
         </div>
       ))}
 
-      <div className="flex justify-end gap-2 border-t border-border pt-4">
-        <Button type="submit" disabled={saving}>
-          {saving ? 'Saving...' : submitLabel}
-        </Button>
-      </div>
+      {!readOnly && (
+        <div className="flex justify-end gap-2 border-t border-border pt-4">
+          <Button type="submit" disabled={saving}>
+            {saving ? 'Saving...' : submitLabel}
+          </Button>
+        </div>
+      )}
     </form>
   );
 }
@@ -178,9 +184,11 @@ export function DynamicForm({
 function FormField({
   field,
   form,
+  disabled = false,
 }: {
   field: FieldDefinitionInput;
   form: ReturnType<typeof useForm<Record<string, unknown>>>;
+  disabled?: boolean;
 }) {
   const error = form.formState.errors[field.field_key]?.message as string | undefined;
   const value = form.watch(field.field_key);
@@ -192,6 +200,7 @@ function FormField({
           <Input
             {...form.register(field.field_key)}
             placeholder={field.label}
+            disabled={disabled}
           />
         );
       case 'NUMBER':
@@ -200,6 +209,7 @@ function FormField({
             type="number"
             {...form.register(field.field_key)}
             placeholder={field.label}
+            disabled={disabled}
           />
         );
       case 'DATE':
@@ -208,6 +218,7 @@ function FormField({
             <PopoverTrigger asChild>
               <Button
                 variant="outline"
+                disabled={disabled}
                 className={cn(
                   'w-full justify-start text-left font-normal',
                   !value && 'text-muted-foreground'
@@ -233,6 +244,7 @@ function FormField({
             <Checkbox
               id={field.field_key}
               checked={!!value}
+              disabled={disabled}
               onCheckedChange={(checked) =>
                 form.setValue(field.field_key, checked === true)
               }
@@ -246,6 +258,7 @@ function FormField({
         return (
           <Select
             value={(value as string) || ''}
+            disabled={disabled}
             onValueChange={(v) => form.setValue(field.field_key, v)}
           >
             <SelectTrigger>
@@ -269,6 +282,7 @@ function FormField({
                 <button
                   key={opt}
                   type="button"
+                  disabled={disabled}
                   onClick={() => {
                     const current = Array.isArray(value) ? value : [];
                     form.setValue(
@@ -295,6 +309,7 @@ function FormField({
         return (
           <Input
             type="file"
+            disabled={disabled}
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) form.setValue(field.field_key, file.name);
@@ -302,7 +317,7 @@ function FormField({
           />
         );
       default:
-        return <Input {...form.register(field.field_key)} placeholder={field.label} />;
+        return <Input {...form.register(field.field_key)} placeholder={field.label} disabled={disabled} />;
     }
   };
 

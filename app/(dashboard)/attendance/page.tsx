@@ -29,16 +29,28 @@ interface EmployeeRef {
   first_name: string;
   last_name: string;
   email: string;
+  shift_id: string | null;
+}
+
+interface ShiftRef {
+  id: string;
+  name: string;
+  start_time: string;
+  end_time: string;
+  early_clock_out_minutes: number;
 }
 
 export default function AttendancePage() {
   const { employee: currentUser, can } = useAccess();
+  const currentEmail = currentUser?.email;
   const canManage = can('attendance.manage');
   const [records, setRecords] = useState<AttendanceRecord[]>([]);
   const [employees, setEmployees] = useState<EmployeeRef[]>([]);
+  const [shifts, setShifts] = useState<ShiftRef[]>([]);
   const [loading, setLoading] = useState(true);
   const [todayRecord, setTodayRecord] = useState<AttendanceRecord | null>(null);
   const [clocking, setClocking] = useState(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   const [entryOpen, setEntryOpen] = useState(false);
   const [editing, setEditing] = useState<AttendanceRecord | null>(null);
@@ -59,13 +71,15 @@ export default function AttendancePage() {
       setLoading(true);
       const [attRes, empRes] = await Promise.all([
         supabase.from('attendance').select('*').order('date', { ascending: false }).limit(100),
-        supabase.from('employees').select('id, first_name, last_name, email'),
+        supabase.from('employees').select('id, first_name, last_name, email, shift_id'),
       ]);
+      const { data: shiftData } = await supabase.from('shifts').select('id, name, start_time, end_time, early_clock_out_minutes');
       setRecords((attRes.data || []) as unknown as AttendanceRecord[]);
       setEmployees((empRes.data || []) as unknown as EmployeeRef[]);
+      setShifts((shiftData || []) as unknown as ShiftRef[]);
 
-      if (currentUser) {
-        const emp = (empRes.data || []).find((e: EmployeeRef) => e.email === currentUser.email);
+      if (currentEmail) {
+        const emp = (empRes.data || []).find((e: EmployeeRef) => e.email === currentEmail);
         if (emp) {
           const todays = (attRes.data || []) as AttendanceRecord[];
           setTodayRecord(todays.find((r) => r.employee_id === emp.id && r.date === today) || null);
@@ -76,9 +90,30 @@ export default function AttendancePage() {
     } finally {
       setLoading(false);
     }
-  }, [today, currentUser?.email]);
+  }, [today, currentEmail]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  const myShift = (() => {
+    const me = employees.find((e) => e.id === currentUser?.id || e.email === currentUser?.email);
+    return shifts.find((s) => s.id === me?.shift_id) || null;
+  })();
+
+  const clockOutOpensAt = (() => {
+    if (!myShift?.end_time) return null;
+    const [h, m] = myShift.end_time.split(':').map(Number);
+    const end = new Date();
+    end.setHours(h || 0, m || 0, 0, 0);
+    return new Date(end.getTime() - (myShift.early_clock_out_minutes || 0) * 60000);
+  })();
+
+  const canClockOut = !clockOutOpensAt || nowTick >= clockOutOpensAt.getTime();
+  const fmtTime = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   const handleClockIn = async () => {
     if (!currentUser) return;
@@ -87,12 +122,15 @@ export default function AttendancePage() {
       const now = new Date().toISOString();
       const { data, error } = await supabase
         .from('attendance')
-        .insert({
-          employee_id: currentUser.id,
-          date: today,
-          clock_in: now,
-          status: 'PRESENT',
-        })
+        .upsert(
+          {
+            employee_id: currentUser.id,
+            date: today,
+            clock_in: now,
+            status: 'PRESENT',
+          },
+          { onConflict: 'employee_id,date' }
+        )
         .select()
         .single();
       if (error) throw error;
@@ -274,10 +312,17 @@ export default function AttendancePage() {
                   {clocking ? 'Clocking in...' : 'Clock In'}
                 </Button>
               ) : !todayRecord.clock_out ? (
-                <Button onClick={handleClockOut} disabled={clocking} variant="outline" className="gap-2">
-                  <LogOut className="h-4 w-4" />
-                  {clocking ? 'Clocking out...' : 'Clock Out'}
-                </Button>
+                canClockOut ? (
+                  <Button onClick={handleClockOut} disabled={clocking} variant="outline" className="gap-2">
+                    <LogOut className="h-4 w-4" />
+                    {clocking ? 'Clocking out...' : 'Clock Out'}
+                  </Button>
+                ) : (
+                  <Button disabled variant="outline" className="gap-2">
+                    <Clock className="h-4 w-4" />
+                    Clock Out at {clockOutOpensAt ? fmtTime(clockOutOpensAt) : '—'}
+                  </Button>
+                )
               ) : (
                 <Button disabled variant="outline" className="gap-2">
                   <CheckCircle className="h-4 w-4" />

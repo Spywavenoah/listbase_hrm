@@ -106,6 +106,7 @@ export const navSections: NavSection[] = [
     icon: Clock,
     items: [
       { label: 'Clock In/Out', href: '/attendance', icon: Clock },
+      { label: 'Shifts', href: '/attendance/shifts', icon: CalendarClock, privilege: 'attendance.manage' },
       { label: 'Timesheets', href: '/attendance/timesheets', icon: ClipboardList, privilege: 'attendance.manage' },
     ],
   },

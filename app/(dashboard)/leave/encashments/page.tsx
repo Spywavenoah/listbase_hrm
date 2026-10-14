@@ -12,7 +12,8 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { toast } from 'sonner';
-import { startWorkflow } from '@/lib/workflow/engine';
+import { startWorkflow, setWorkflowActors } from '@/lib/workflow/engine';
+import { WorkflowActorPicker } from '@/components/workflow/workflow-actor-picker';
 import { useAccess } from '@/lib/access';
 import { enqueueAndProcess } from '@/lib/notifications';
 
@@ -50,6 +51,8 @@ export default function LeaveEncashmentsPage() {
   const [saving, setSaving] = useState(false);
   const [quoted, setQuoted] = useState<LeaveType | null>(null);
   const [form, setForm] = useState({ leave_type_id: '', days: '', reason: '' });
+  const [actorAuthorizer, setActorAuthorizer] = useState<string | null>(null);
+  const [actorApprover, setActorApprover] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -110,6 +113,7 @@ export default function LeaveEncashmentsPage() {
         await supabase.from('leave_encashment_requests').update({ status: 'SUBMITTED' }).eq('id', row.id);
         toast.warning('No approval workflow enabled — request stays submitted');
       } else {
+        await setWorkflowActors('leave.encashment', row.id, actorAuthorizer, actorApprover);
         toast.success('Encashment request submitted for approval');
       }
       await enqueueAndProcess({
@@ -123,6 +127,8 @@ export default function LeaveEncashmentsPage() {
       setCreateOpen(false);
       setForm({ leave_type_id: '', days: '', reason: '' });
       setQuoted(null);
+      setActorAuthorizer(null);
+      setActorApprover(null);
       load();
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
@@ -207,6 +213,11 @@ export default function LeaveEncashmentsPage() {
               <Label>Reason</Label>
               <Textarea value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} rows={2} placeholder="Optional justification" />
             </div>
+            <WorkflowActorPicker
+              authorizerId={actorAuthorizer}
+              approverId={actorApprover}
+              onChange={(a, b) => { setActorAuthorizer(a); setActorApprover(b); }}
+            />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>

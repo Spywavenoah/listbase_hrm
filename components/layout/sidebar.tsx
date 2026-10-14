@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { ChevronDown, Building2, LogOut, Lock, Eye, EyeOff, CheckCircle, Info } from 'lucide-react';
+import { ChevronDown, Building2, LogOut, Lock, Eye, EyeOff, CheckCircle, Info, UserCircle } from 'lucide-react';
 import { navSections } from '@/lib/navigation';
 import { supabase } from '@/lib/supabase/client';
 import { clearEmployeeSession } from '@/lib/supabase/session';
@@ -225,6 +225,14 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             <DropdownMenuItem onClick={() => setPwOpen(true)}>
               <Lock className="mr-2 h-4 w-4" /> Change Password
             </DropdownMenuItem>
+            {employee?.id && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => { router.push(`/employees/${employee.id}/personal`); onNavigate?.(); }}>
+                  <UserCircle className="mr-2 h-4 w-4" /> My Profile
+                </DropdownMenuItem>
+              </>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem className="text-destructive" onClick={handleSignOut}>
               <LogOut className="mr-2 h-4 w-4" /> Sign Out

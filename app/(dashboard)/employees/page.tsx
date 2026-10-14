@@ -3,31 +3,14 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { ModuleListPage, type SummaryCard, type Column } from '@/components/shared/module-list-page';
-import { Users, UserPlus, UserCheck, UserX, Eye, Pencil, Send, Ban } from 'lucide-react';
+import { Users, UserPlus, UserCheck, UserX, Eye, Pencil, Send, Ban, KeyRound } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import type { Employee } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-  DialogDescription,
-} from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
@@ -41,6 +24,7 @@ const statusColors: Record<string, string> = {
   ONBOARDING: 'bg-info/10 text-info border-info/20',
   ON_LEAVE: 'bg-primary/10 text-primary border-primary/20',
   TERMINATED: 'bg-destructive/10 text-destructive border-destructive/20',
+  DISABLED: 'bg-muted text-muted-foreground border-border',
 };
 
 async function createSetupToken(employeeId: string): Promise<string> {
@@ -69,6 +53,11 @@ export default function EmployeesPage() {
   const [savingAccess, setSavingAccess] = useState(false);
   const [disableTarget, setDisableTarget] = useState<Employee | null>(null);
   const [disabling, setDisabling] = useState(false);
+  const [disableReason, setDisableReason] = useState('');
+  const [resetTarget, setResetTarget] = useState<Employee | null>(null);
+  const [resetResult, setResetResult] = useState<{ employee: Employee; link: string } | null>(null);
+  const [generatingReset, setGeneratingReset] = useState(false);
+  const [resendingReset, setResendingReset] = useState(false);
 
   const canManage = can('employees.manage');
   const canManageAccess = can('admin.privileges');
@@ -239,18 +228,74 @@ export default function EmployeesPage() {
     }
     setDisabling(true);
     try {
+      if (!disableReason.trim()) {
+        toast.error('Please provide a reason for disabling');
+        setDisabling(false);
+        return;
+      }
       const { error } = await supabase.rpc('set_employee_disabled', {
         p_employee_id: disableTarget.id,
         p_disabled: true,
+        p_reason: disableReason.trim(),
       });
       if (error) throw error;
       toast.success(`${disableTarget.first_name} has been disabled`);
       setDisableTarget(null);
+      setDisableReason('');
       loadEmployees();
     } catch (err) {
       toast.error('Failed to disable: ' + (err as Error).message);
     } finally {
       setDisabling(false);
+    }
+  };
+
+  const handleGenerateReset = async () => {
+    if (!resetTarget) return;
+    if (resetTarget.id === myId) {
+      toast.error('Use the Security settings to change your own password');
+      setResetTarget(null);
+      return;
+    }
+    setGeneratingReset(true);
+    try {
+      const { data, error } = await supabase.rpc('reset_employee_password', {
+        p_employee_id: resetTarget.id,
+      });
+      if (error) throw error;
+      const link = `${window.location.origin}/setup-account?token=${data}`;
+      setResetResult({ employee: resetTarget, link });
+      setResetTarget(null);
+      await handleSendResetEmail(resetTarget, link, true);
+    } catch (err) {
+      toast.error('Failed to reset password: ' + (err as Error).message);
+    } finally {
+      setGeneratingReset(false);
+    }
+  };
+
+  const handleSendResetEmail = async (emp: Employee, link: string, silent = false) => {
+    setResendingReset(true);
+    try {
+      await enqueueAndProcess({
+        eventKey: 'password.reset',
+        recipientEmail: emp.email,
+        recipientName: `${emp.first_name} ${emp.last_name}`,
+        subject: '',
+        bodyHtml: '',
+        metadata: {
+          employee_name: `${emp.first_name} ${emp.last_name}`,
+          employee_email: emp.email,
+          first_name: emp.first_name,
+          company_name: 'HRM Flow',
+          reset_link: link,
+        },
+      });
+      if (!silent) toast.success(`Reset email sent to ${emp.email}`);
+    } catch (err) {
+      toast.error('Failed to send reset email: ' + (err as Error).message);
+    } finally {
+      setResendingReset(false);
     }
   };
 
@@ -322,8 +367,8 @@ export default function EmployeesPage() {
           <Badge variant="outline" className={statusColors[e.employment_status] || ''}>
             {e.employment_status.replace(/_/g, ' ')}
           </Badge>
-          {e.is_login_blocked && (
-            <Badge variant="outline" className="bg-destructive/10 text-destructive border-destructive/20">
+          {e.is_login_blocked && e.employment_status !== 'DISABLED' && (
+            <Badge variant="outline" className="bg-destructive/10 text-destructive border-destructive/20" title={e.disabled_reason || undefined}>
               Disabled
             </Badge>
           )}
@@ -392,6 +437,17 @@ export default function EmployeesPage() {
                 onClick={(e) => { e.stopPropagation(); handleResendInvitation(emp); }}
               >
                 <Send className={`h-4 w-4 ${resending === emp.id ? 'animate-pulse' : ''}`} />
+              </Button>
+            )}
+            {canManage && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-warning"
+                title="Reset password"
+                onClick={(e) => { e.stopPropagation(); setResetTarget(emp); setResetResult(null); }}
+              >
+                <KeyRound className="h-4 w-4" />
               </Button>
             )}
             {canManage &&
@@ -511,29 +567,98 @@ export default function EmployeesPage() {
         </DialogContent>
       </Dialog>
 
-      <AlertDialog
-        open={!!disableTarget}
-        onOpenChange={(open) => { if (!open) setDisableTarget(null); }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Disable this employee?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will block <strong>{disableTarget?.first_name} {disableTarget?.last_name}</strong> from logging in. Their record and data will remain intact. You can re-enable them at any time.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
+      <Dialog open={!!disableTarget} onOpenChange={(open) => { if (!open) { setDisableTarget(null); setDisableReason(''); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Disable this employee?</DialogTitle>
+            <DialogDescription>
+              This will block <strong>{disableTarget?.first_name} {disableTarget?.last_name}</strong> from logging in,
+              mark them as <strong>disabled</strong>, and exclude them from payroll. Their record and data remain intact.
+              You can re-enable them at any time.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5 py-2">
+            <Label>Reason *</Label>
+            <Input
+              value={disableReason}
+              onChange={(e) => setDisableReason(e.target.value)}
+              placeholder="e.g. Extended suspension, prolonged sick leave"
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setDisableTarget(null); setDisableReason(''); }}>Cancel</Button>
+            <Button
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               disabled={disabling}
               onClick={handleDisable}
             >
               {disabling ? 'Disabling...' : 'Disable'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!resetTarget || !!resetResult}
+        onOpenChange={(open) => { if (!open) { setResetTarget(null); setResetResult(null); } }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{resetResult ? 'Password reset link' : 'Reset password?'}</DialogTitle>
+            <DialogDescription>
+              {resetResult ? (
+                <>
+                  <strong>{resetResult.employee.first_name} {resetResult.employee.last_name}</strong>&apos;s password was
+                  invalidated. They must use the link below to set a new one.
+                </>
+              ) : (
+                <>
+                  This invalidates <strong>{resetTarget?.first_name} {resetTarget?.last_name}</strong>&apos;s current password
+                  and generates a one-time setup link. An email will be sent automatically.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          {resetResult ? (
+            <div className="space-y-3 py-2">
+              <div className="rounded-lg border border-border bg-muted/40 p-3">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Setup link</p>
+                <p className="mt-1 truncate font-mono text-xs">{resetResult.link}</p>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  className="flex-1"
+                  disabled={resendingReset}
+                  onClick={() => handleSendResetEmail(resetResult.employee, resetResult.link)}
+                >
+                  {resendingReset ? 'Sending...' : 'Resend email'}
+                </Button>
+                <Button
+                  className="flex-1"
+                  onClick={() => { navigator.clipboard?.writeText(resetResult.link); toast.success('Link copied'); }}
+                >
+                  Copy link
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <p className="py-2 text-sm text-muted-foreground">
+              The reset link expires in 72 hours. If the employee no longer has access to their email, copy the link instead.
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setResetTarget(null); setResetResult(null); }}>
+              Close
+            </Button>
+            {!resetResult && (
+              <Button disabled={generatingReset} onClick={handleGenerateReset}>
+                {generatingReset ? 'Generating...' : 'Generate reset link'}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>

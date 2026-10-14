@@ -15,7 +15,8 @@ import { toast } from 'sonner';
 import { LineItemsEditor, type LineItem } from '@/components/shared/line-items-editor';
 import { ProcurementEmployeePicker } from '@/components/shared/procurement-employee-picker';
 import { refNumber, fmtMoney, procStatusClass, PRIORITIES, PURCHASE_TYPES, CURRENCIES } from '@/lib/procurement';
-import { startWorkflow } from '@/lib/workflow/engine';
+import { startWorkflow, setWorkflowActors } from '@/lib/workflow/engine';
+import { WorkflowSubmitDialog } from '@/components/workflow/workflow-submit-dialog';
 import { useAccess } from '@/lib/access';
 
 interface Requisition {
@@ -56,6 +57,7 @@ export default function RequisitionsPage() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailItems, setDetailItems] = useState<LineItem[]>([]);
   const [saving, setSaving] = useState(false);
+  const [submitTarget, setSubmitTarget] = useState<Requisition | null>(null);
 
   const [form, setForm] = useState({
     requester_id: '',
@@ -216,7 +218,7 @@ export default function RequisitionsPage() {
     }
   };
 
-  const submitRequisition = async (row: Requisition) => {
+  const submitRequisition = async (row: Requisition, authorizerId: string | null, approverId: string | null) => {
     try {
       const { error } = await supabase.from('procurement_requisitions')
         .update({ status: 'PENDING_APPROVAL' })
@@ -231,6 +233,7 @@ export default function RequisitionsPage() {
         load();
         return;
       }
+      await setWorkflowActors('procurement.requisition', row.id, authorizerId, approverId);
       toast.success('Requisition submitted for approval');
       load();
     } catch (err) {
@@ -295,11 +298,11 @@ export default function RequisitionsPage() {
             {r.status === 'DRAFT' && (
               <>
                 <Button size="sm" variant="ghost" onClick={() => openEdit(r)}>Edit</Button>
-                <Button size="sm" variant="ghost" onClick={() => submitRequisition(r)}>Submit</Button>
+                <Button size="sm" variant="ghost" onClick={() => setSubmitTarget(r)}>Submit</Button>
               </>
             )}
             {r.status === 'REJECTED' && (
-              <Button size="sm" variant="ghost" onClick={() => submitRequisition(r)}>Resubmit</Button>
+              <Button size="sm" variant="ghost" onClick={() => setSubmitTarget(r)}>Resubmit</Button>
             )}
             {(r.status === 'DRAFT' || r.status === 'PENDING_APPROVAL') && (
               <Button size="sm" variant="ghost" className="text-destructive" onClick={() => cancelRequisition(r)}>Cancel</Button>
@@ -455,7 +458,7 @@ export default function RequisitionsPage() {
           })()}
           <DialogFooter>
             {detailId && rows.find((r) => r.id === detailId)?.status === 'DRAFT' && (
-              <Button onClick={() => { const r = rows.find((x) => x.id === detailId); if (r) { setDetailOpen(false); submitRequisition(r); } }}>
+              <Button onClick={() => { const r = rows.find((x) => x.id === detailId); if (r) { setDetailOpen(false); setSubmitTarget(r); } }}>
                 Submit for Approval
               </Button>
             )}
@@ -463,6 +466,14 @@ export default function RequisitionsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <WorkflowSubmitDialog
+        open={!!submitTarget}
+        onOpenChange={(o) => { if (!o) setSubmitTarget(null); }}
+        title={`Submit ${submitTarget?.req_number ?? 'requisition'} for approval`}
+        description="Choose who authorizes and who gives final approval for this requisition."
+        onConfirm={async (a, b) => { if (submitTarget) await submitRequisition(submitTarget, a, b); setSubmitTarget(null); }}
+      />
     </>
   );
 }

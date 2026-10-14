@@ -10,9 +10,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { RichTextEditor } from '@/components/ui/rich-text-editor';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
-import { startWorkflow, WORKFLOW_MODULE_LABELS } from '@/lib/workflow/engine';
+import { startWorkflow, setWorkflowActors, WORKFLOW_MODULE_LABELS } from '@/lib/workflow/engine';
+import { WorkflowSubmitDialog } from '@/components/workflow/workflow-submit-dialog';
 import { useAccess } from '@/lib/access';
 
 interface Requisition {
@@ -25,6 +27,7 @@ interface Requisition {
   budget_min: number | null;
   budget_max: number | null;
   justification: string | null;
+  job_description: string | null;
   requested_by: string | null;
   status: string;
   approved_at: string | null;
@@ -47,6 +50,7 @@ export default function RecruitmentRequisitionsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editingReq, setEditingReq] = useState<Requisition | null>(null);
   const [saving, setSaving] = useState(false);
+  const [submitTarget, setSubmitTarget] = useState<Requisition | null>(null);
 
   const [form, setForm] = useState({
     title: '',
@@ -57,6 +61,7 @@ export default function RecruitmentRequisitionsPage() {
     budget_min: '',
     budget_max: '',
     justification: '',
+    job_description: '',
   });
 
   const load = useCallback(async () => {
@@ -95,6 +100,7 @@ export default function RecruitmentRequisitionsPage() {
       budget_min: '',
       budget_max: '',
       justification: '',
+      job_description: '',
     });
   };
 
@@ -109,6 +115,7 @@ export default function RecruitmentRequisitionsPage() {
       budget_min: row.budget_min === null ? '' : String(row.budget_min),
       budget_max: row.budget_max === null ? '' : String(row.budget_max),
       justification: row.justification || '',
+      job_description: row.job_description || '',
     });
     setCreateOpen(true);
   };
@@ -134,6 +141,7 @@ export default function RecruitmentRequisitionsPage() {
         budget_min: form.budget_min === '' ? null : Number(form.budget_min),
         budget_max: form.budget_max === '' ? null : Number(form.budget_max),
         justification: form.justification || null,
+        job_description: form.job_description || null,
         requested_by: employee?.id,
       };
       if (editingReq) {
@@ -158,7 +166,7 @@ export default function RecruitmentRequisitionsPage() {
     }
   };
 
-  const submitRequisition = async (row: Requisition) => {
+  const submitRequisition = async (row: Requisition, authorizerId: string | null, approverId: string | null) => {
     try {
       const { error } = await supabase.from('recruitment_requisitions')
         .update({ status: 'SUBMITTED' })
@@ -173,6 +181,7 @@ export default function RecruitmentRequisitionsPage() {
         load();
         return;
       }
+      await setWorkflowActors('recruitment.requisition', row.id, authorizerId, approverId);
       toast.success('Requisition submitted for approval');
       load();
     } catch (err) {
@@ -204,7 +213,7 @@ export default function RecruitmentRequisitionsPage() {
         status: 'DRAFT',
         employment_type: row.employment_type,
         requisition_id: row.id,
-        description: row.justification,
+        description: row.job_description || row.justification,
       });
       if (error) throw error;
       toast.success('Job posting created from requisition');
@@ -259,7 +268,7 @@ export default function RecruitmentRequisitionsPage() {
               <Button size="sm" variant="ghost" onClick={() => openEdit(r)}>Edit</Button>
             )}
             {(r.status === 'DRAFT' || r.status === 'REJECTED') && (
-              <Button size="sm" variant="ghost" onClick={() => submitRequisition(r)}>{r.status === 'REJECTED' ? 'Resubmit' : 'Submit'}</Button>
+              <Button size="sm" variant="ghost" onClick={() => setSubmitTarget(r)}>{r.status === 'REJECTED' ? 'Resubmit' : 'Submit'}</Button>
             )}
             {r.status === 'APPROVED' && (
               <Button size="sm" variant="ghost" onClick={() => createJob(r)}>Create Job</Button>
@@ -330,6 +339,15 @@ export default function RecruitmentRequisitionsPage() {
               <Label>Justification</Label>
               <Textarea rows={3} value={form.justification} onChange={(e) => setForm({ ...form, justification: e.target.value })} placeholder="Why is this hire needed?" />
             </div>
+            <div className="space-y-1.5">
+              <Label>Job Description</Label>
+              <RichTextEditor
+                value={form.job_description}
+                onChange={(html) => setForm({ ...form, job_description: html })}
+                placeholder="Describe the role — responsibilities, requirements, reporting line..."
+              />
+              <p className="text-xs text-muted-foreground">Rich text (HTML) job description carried into the job posting when created.</p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={closeCreate}>Cancel</Button>
@@ -339,6 +357,14 @@ export default function RecruitmentRequisitionsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <WorkflowSubmitDialog
+        open={!!submitTarget}
+        onOpenChange={(o) => { if (!o) setSubmitTarget(null); }}
+        title={`Submit "${submitTarget?.title ?? 'requisition'}" for approval`}
+        description="Choose who authorizes and who gives final approval for this requisition."
+        onConfirm={async (a, b) => { if (submitTarget) await submitRequisition(submitTarget, a, b); setSubmitTarget(null); }}
+      />
     </>
   );
 }

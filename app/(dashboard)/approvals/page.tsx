@@ -22,13 +22,17 @@ import {
   fetchPendingApprovals,
   approveWorkflowStep,
   rejectWorkflowStep,
+  fetchAppealable,
+  appealWorkflowStep,
   WORKFLOW_MODULE_LABELS,
   type PendingApproval,
+  type AppealableWorkflow,
 } from '@/lib/workflow/engine';
 import { ALL_PROCUREMENT_PRIVILEGES } from '@/lib/navigation';
 import { useAccess } from '@/lib/access';
 import { useRouter } from 'next/navigation';
-import { ExternalLink } from 'lucide-react';
+import { ExternalLink, RotateCcw } from 'lucide-react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 const PROC_MODULE_PAGES: Record<string, string> = {
   'procurement.requisition': '/procurement/requisitions',
@@ -51,12 +55,20 @@ export default function ApprovalsPage() {
   const [target, setTarget] = useState<ActionTarget | null>(null);
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [appealables, setAppealables] = useState<AppealableWorkflow[]>([]);
+  const [appealTarget, setAppealTarget] = useState<AppealableWorkflow | null>(null);
+  const [appealComment, setAppealComment] = useState('');
+  const [appealing, setAppealing] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const rows = await fetchPendingApprovals();
+      const [rows, appeals] = await Promise.all([
+        fetchPendingApprovals(),
+        fetchAppealable().catch(() => [] as AppealableWorkflow[]),
+      ]);
       setApprovals(rows);
+      setAppealables(appeals);
     } catch (err) {
       console.error(err);
       toast.error('Failed to load approvals: ' + (err as Error).message);
@@ -66,6 +78,22 @@ export default function ApprovalsPage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const submitAppeal = async () => {
+    if (!appealTarget) return;
+    setAppealing(true);
+    try {
+      await appealWorkflowStep(appealTarget.instance_id, appealComment);
+      toast.success('Workflow appealed — it is now pending re-approval');
+      setAppealTarget(null);
+      setAppealComment('');
+      load();
+    } catch (err) {
+      toast.error('Failed to appeal: ' + (err as Error).message);
+    } finally {
+      setAppealing(false);
+    }
+  };
 
   const submit = async () => {
     if (!target) return;
@@ -153,6 +181,94 @@ export default function ApprovalsPage() {
           )
         }
       />
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div>
+            <CardTitle className="text-lg">Approved — Appealable</CardTitle>
+            <p className="mt-0.5 text-sm text-muted-foreground">
+              Approved workflows you can reopen for a fresh approval round
+            </p>
+          </div>
+          <RotateCcw className="h-4.5 w-4.5 text-muted-foreground" />
+        </CardHeader>
+        <CardContent className="p-0">
+          {appealables.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+              <RotateCcw className="h-8 w-8 mb-2 opacity-40" />
+              <p className="text-sm">No appealable workflows right now.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-border">
+              {appealables.map((a) => (
+                <div key={a.instance_id} className="flex items-center gap-4 p-4 hover:bg-accent/30 transition-colors">
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium">
+                      {WORKFLOW_MODULE_LABELS[a.module_key] || a.module_key}
+                      <span className="ml-2 text-sm text-muted-foreground">{a.workflow_name}</span>
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {a.requester_name || 'Unknown'} · approved {a.approved_at ? new Date(a.approved_at).toLocaleString() : '—'}
+                    </p>
+                  </div>
+                  {PROC_MODULE_PAGES[a.module_key] && canViewProcurement && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => router.push(PROC_MODULE_PAGES[a.module_key])}
+                    >
+                      <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                      View
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 border-warning/30 text-warning hover:bg-warning/10"
+                    onClick={() => { setAppealTarget(a); setAppealComment(''); }}
+                  >
+                    <RotateCcw className="mr-1 h-3.5 w-3.5" />
+                    Appeal
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <AlertDialog open={!!appealTarget} onOpenChange={(open) => { if (!open && !appealing) setAppealTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Appeal this approval?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This reopens{' '}
+              <strong>{appealTarget ? WORKFLOW_MODULE_LABELS[appealTarget.module_key] || appealTarget.module_key : ''}</strong>{' '}
+              for a fresh approval round. It becomes pending again and the request record can be edited while it is pending.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="appeal-comment">Reason for appeal (optional)</Label>
+            <Textarea
+              id="appeal-comment"
+              value={appealComment}
+              onChange={(e) => setAppealComment(e.target.value)}
+              placeholder="Explain why this should be re-reviewed..."
+              rows={3}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={appealing}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-warning text-warning-foreground hover:bg-warning/90"
+              disabled={appealing}
+              onClick={(e) => { e.preventDefault(); submitAppeal(); }}
+            >
+              {appealing ? 'Appealing...' : 'Appeal'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={!!target} onOpenChange={(open) => { if (!open && !submitting) setTarget(null); }}>
         <AlertDialogContent>
