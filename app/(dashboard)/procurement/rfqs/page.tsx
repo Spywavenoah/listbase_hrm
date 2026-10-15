@@ -13,6 +13,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
 import { refNumber, procStatusClass, CURRENCIES } from '@/lib/procurement';
+import { enqueueEmail, triggerMailProcessing } from '@/lib/notifications';
 
 interface RFQVendor { vendor_id: string; responded: boolean }
 
@@ -30,7 +31,7 @@ interface RFQ {
   created_at: string;
 }
 
-interface Vendor { id: string; name: string }
+interface Vendor { id: string; name: string; email?: string | null }
 interface Requisition { id: string; req_number: string; purpose: string | null }
 
 export default function RfqsPage() {
@@ -39,6 +40,7 @@ export default function RfqsPage() {
   const [requisitions, setRequisitions] = useState<Requisition[]>([]);
   const [rfqVendors, setRfqVendors] = useState<Record<string, RFQVendor[]>>({});
   const [vendorLookup, setVendorLookup] = useState<Record<string, string>>({});
+  const [vendorEmail, setVendorEmail] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -60,7 +62,7 @@ export default function RfqsPage() {
     try {
       const [fRes, vRes, rRes, rvRes] = await Promise.all([
         supabase.from('procurement_rfqs').select('*').order('created_at', { ascending: false }),
-        supabase.from('procurement_vendors').select('id, name').eq('is_active', true).order('name'),
+        supabase.from('procurement_vendors').select('id, name, email').eq('is_active', true).order('name'),
         supabase.from('procurement_requisitions').select('id, req_number, purpose').eq('status', 'APPROVED').order('created_at', { ascending: false }),
         supabase.from('procurement_rfq_vendors').select('rfq_id, vendor_id, responded'),
       ]);
@@ -68,8 +70,13 @@ export default function RfqsPage() {
       setVendors(vRes.data || []);
       setRequisitions((rRes.data || []) as unknown as Requisition[]);
       const vl: Record<string, string> = {};
-      for (const v of (vRes.data || [])) vl[v.id] = v.name;
+      const ve: Record<string, string> = {};
+      for (const v of (vRes.data || [])) {
+        vl[v.id] = v.name;
+        if (v.email) ve[v.id] = v.email;
+      }
       setVendorLookup(vl);
+      setVendorEmail(ve);
       const grouped: Record<string, RFQVendor[]> = {};
       for (const row of (rvRes.data || []) as Record<string, unknown>[]) {
         (grouped[row.rfq_id as string] = grouped[row.rfq_id as string] || []).push({
@@ -174,7 +181,39 @@ export default function RfqsPage() {
     try {
       const { error } = await supabase.from('procurement_rfqs').update({ status: 'OPEN' }).eq('id', row.id);
       if (error) throw error;
-      const invited = (rfqVendors[row.id] || []).map((v) => vendorLookup[v.vendor_id]).filter(Boolean).join(', ');
+
+      const invitedVendors = rfqVendors[row.id] || [];
+      const invited = invitedVendors.map((v) => vendorLookup[v.vendor_id]).filter(Boolean).join(', ');
+
+      const mailable = invitedVendors.filter((v) => vendorEmail[v.vendor_id]);
+      if (mailable.length) {
+        const deadlineText = row.deadline
+          ? `<p><strong>Submission deadline:</strong> ${new Date(row.deadline).toLocaleDateString()}</p>`
+          : '';
+        await Promise.all(
+          mailable.map((v) =>
+            enqueueEmail({
+              eventKey: 'rfq.invitation',
+              recipientEmail: vendorEmail[v.vendor_id],
+              recipientName: vendorLookup[v.vendor_id],
+              subject: `Request for Quotation: ${row.title}`,
+              bodyHtml:
+                `<p>Dear ${vendorLookup[v.vendor_id] || 'Supplier'},</p>` +
+                `<p>You are invited to submit a quotation for <strong>${row.title}</strong> (${row.rfq_number}).</p>` +
+                `${row.description ? `<p>${row.description}</p>` : ''}` +
+                `${deadlineText}` +
+                `<p>Please submit your quotation at your earliest convenience.</p>`,
+              metadata: { rfq_id: row.id, rfq_number: row.rfq_number },
+            })
+          )
+        );
+        try {
+          await triggerMailProcessing();
+        } catch (mailErr) {
+          console.warn('RFQ mail dispatch deferred', mailErr);
+        }
+      }
+
       toast.success(`RFQ published — invited: ${invited || 'no vendors'}`);
       load();
     } catch (err) {

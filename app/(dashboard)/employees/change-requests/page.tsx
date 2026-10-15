@@ -10,7 +10,7 @@ import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase/client';
 import { useAccess } from '@/lib/access';
 import { AccessGate } from '@/lib/access';
-import { getPendingWorkflowInstance, approveWorkflowStep, rejectWorkflowStep } from '@/lib/workflow/engine';
+import { getPendingWorkflowInstance, getWorkflowStepContext, approveWorkflowStep, rejectWorkflowStep } from '@/lib/workflow/engine';
 import { CheckCircle, XCircle, ClipboardList, Inbox } from 'lucide-react';
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -62,16 +62,33 @@ export default function ChangeRequestsPage() {
   const [approve, setApprove] = useState(true);
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [stepFinal, setStepFinal] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const { data, error } = await supabase
         .from('employee_change_requests')
-        .select('*, employees(first_name, last_name, email)')
+        .select('*, employees!employee_change_requests_employee_id_fkey(first_name, last_name, email)')
         .order('requested_at', { ascending: false });
       if (error) throw error;
-      setRequests((data || []) as unknown as ChangeRequest[]);
+      const rows = (data || []) as unknown as ChangeRequest[];
+      setRequests(rows);
+
+      const finals: Record<string, boolean> = {};
+      await Promise.all(
+        rows
+          .filter((r) => r.status === 'PENDING')
+          .map(async (r) => {
+            try {
+              const ctx = await getWorkflowStepContext('employee.change_request', r.id);
+              finals[r.id] = ctx ? ctx.is_final !== false : true;
+            } catch {
+              finals[r.id] = true;
+            }
+          })
+      );
+      setStepFinal(finals);
     } catch (err) {
       console.error(err);
       toast.error('Failed to load change requests: ' + (err as Error).message);
@@ -105,7 +122,14 @@ export default function ChangeRequestsPage() {
         });
         if (error) throw error;
       }
-      toast.success(approve ? 'Change request approved and applied' : 'Change request rejected');
+      const isAuthorize = approve && target && stepFinal[target.id] === false;
+      toast.success(
+        isAuthorize
+          ? 'Change request authorized — awaiting final approval'
+          : approve
+            ? 'Change request approved and applied'
+            : 'Change request rejected'
+      );
       setTarget(null);
       setNote('');
       load();
@@ -222,7 +246,7 @@ export default function ChangeRequestsPage() {
                           onClick={() => { setTarget(r); setApprove(true); setNote(''); }}
                         >
                           <CheckCircle className="mr-1 h-3.5 w-3.5" />
-                          Approve
+                          {stepFinal[r.id] === false ? 'Authorize' : 'Approve'}
                         </Button>
                         <Button
                           size="sm"
@@ -249,7 +273,7 @@ export default function ChangeRequestsPage() {
         <AlertDialog open={!!target} onOpenChange={(open) => { if (!open && !submitting) setTarget(null); }}>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>{approve ? 'Approve change request?' : 'Reject change request?'}</AlertDialogTitle>
+              <AlertDialogTitle>{approve ? (target && stepFinal[target.id] === false ? 'Authorize change request?' : 'Approve change request?') : 'Reject change request?'}</AlertDialogTitle>
               <AlertDialogDescription>
                 {target && (
                   <>
@@ -277,7 +301,7 @@ export default function ChangeRequestsPage() {
                 disabled={submitting}
                 onClick={(e) => { e.preventDefault(); submit(); }}
               >
-                {submitting ? 'Submitting...' : approve ? 'Approve' : 'Reject'}
+                {submitting ? 'Submitting...' : approve ? (target && stepFinal[target.id] === false ? 'Authorize' : 'Approve') : 'Reject'}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

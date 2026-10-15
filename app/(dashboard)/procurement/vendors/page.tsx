@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
 
 interface Vendor {
@@ -21,8 +22,13 @@ interface Vendor {
   phone: string | null;
   tax_id: string | null;
   address: string | null;
+  services: string[] | null;
+  tags: string[] | null;
   is_active: boolean;
 }
+
+const parseList = (s: string) =>
+  s.split(',').map((v) => v.trim()).filter(Boolean);
 
 export default function VendorsPage() {
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -30,6 +36,7 @@ export default function VendorsPage() {
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Vendor | null>(null);
+  const [tagFilter, setTagFilter] = useState<string>('__all__');
   const [form, setForm] = useState({
     name: '',
     contact_person: '',
@@ -37,6 +44,8 @@ export default function VendorsPage() {
     phone: '',
     tax_id: '',
     address: '',
+    services: '',
+    tags: '',
     is_active: true,
   });
 
@@ -62,7 +71,7 @@ export default function VendorsPage() {
   useEffect(() => { load(); }, [load]);
 
   const resetForm = () => {
-    setForm({ name: '', contact_person: '', email: '', phone: '', tax_id: '', address: '', is_active: true });
+    setForm({ name: '', contact_person: '', email: '', phone: '', tax_id: '', address: '', services: '', tags: '', is_active: true });
     setEditing(null);
   };
 
@@ -80,6 +89,8 @@ export default function VendorsPage() {
       phone: v.phone || '',
       tax_id: v.tax_id || '',
       address: v.address || '',
+      services: (v.services || []).join(', '),
+      tags: (v.tags || []).join(', '),
       is_active: v.is_active,
     });
     setOpen(true);
@@ -98,6 +109,8 @@ export default function VendorsPage() {
         phone: form.phone || null,
         tax_id: form.tax_id || null,
         address: form.address || null,
+        services: parseList(form.services),
+        tags: parseList(form.tags),
         is_active: form.is_active,
       };
       const { error } = editing
@@ -133,11 +146,31 @@ export default function VendorsPage() {
     { label: 'Quotes Submitted', value: Object.values(quoteCounts).reduce((s, n) => s + n, 0), icon: FileText, color: 'info' },
   ];
 
+  const allTags = Array.from(new Set(vendors.flatMap((v) => [...(v.tags || []), ...(v.services || [])]))).sort();
+
+  const visibleVendors = tagFilter === '__all__'
+    ? vendors
+    : vendors.filter((v) => (v.tags || []).includes(tagFilter) || (v.services || []).includes(tagFilter));
+
   const columns: Column<Vendor>[] = [
     { key: 'name', label: 'Vendor', render: (v) => <span className="font-medium">{v.name}</span> },
     { key: 'contact_person', label: 'Contact', render: (v) => v.contact_person || '—' },
     { key: 'email', label: 'Email', render: (v) => v.email || '—' },
     { key: 'phone', label: 'Phone', render: (v) => v.phone || '—' },
+    {
+      key: 'services', label: 'Services',
+      render: (v) => (v.services && v.services.length > 0)
+        ? <div className="flex flex-wrap gap-1 max-w-[220px]">{v.services.map((s) => <Badge key={s} variant="secondary" className="text-xs">{s}</Badge>)}</div>
+        : '—',
+      searchText: (v) => v.services || [],
+    },
+    {
+      key: 'tags', label: 'Tags',
+      render: (v) => (v.tags && v.tags.length > 0)
+        ? <div className="flex flex-wrap gap-1 max-w-[200px]">{v.tags.map((t) => <Badge key={t} variant="outline" className="text-xs">{t}</Badge>)}</div>
+        : '—',
+      searchText: (v) => v.tags || [],
+    },
     {
       key: 'is_active', label: 'Status',
       render: (v) => v.is_active
@@ -153,11 +186,20 @@ export default function VendorsPage() {
         description="Manage supplier and vendor master records"
         summaryCards={summaryCards}
         columns={columns}
-        data={vendors}
+        data={visibleVendors}
         loading={loading}
-        searchPlaceholder="Search vendors..."
+        searchPlaceholder="Search vendors, services, tags..."
         createLabel="Add Vendor"
         onCreate={openCreate}
+        toolbarActions={allTags.length > 0 ? (
+          <Select value={tagFilter} onValueChange={setTagFilter}>
+            <SelectTrigger className="w-44"><SelectValue placeholder="Filter by tag" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All services & tags</SelectItem>
+              {allTags.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        ) : undefined}
         onEdit={openEdit}
         onDelete={async (v) => {
           try {
@@ -207,6 +249,16 @@ export default function VendorsPage() {
             <div className="space-y-1.5">
               <Label>Address</Label>
               <Textarea rows={2} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Services</Label>
+              <Input value={form.services} onChange={(e) => setForm({ ...form, services: e.target.value })} placeholder="Comma separated, e.g. Stationery, ICT Hardware" />
+              <p className="text-xs text-muted-foreground">What this vendor supplies or provides.</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Tags</Label>
+              <Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} placeholder="Comma separated, e.g. preferred, local, ict" />
+              <p className="text-xs text-muted-foreground">Used to filter and group vendors.</p>
             </div>
             <div className="flex items-center gap-2">
               <Switch checked={form.is_active} onCheckedChange={(v) => setForm({ ...form, is_active: v })} />

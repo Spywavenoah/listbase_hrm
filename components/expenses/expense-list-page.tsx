@@ -27,6 +27,7 @@ import { saveFieldValues } from '@/lib/field-engine/client';
 import {
   setWorkflowActors,
   getPendingWorkflowInstance,
+  getWorkflowStepContext,
   approveWorkflowStep,
   rejectWorkflowStep,
 } from '@/lib/workflow/engine';
@@ -140,6 +141,7 @@ export default function ExpenseListPage({
   const [decisionNote, setDecisionNote] = useState('');
   const [decisionActual, setDecisionActual] = useState('');
   const [decisionSaving, setDecisionSaving] = useState(false);
+  const [expenseStepFinal, setExpenseStepFinal] = useState<Record<string, boolean>>({});
 
   const [viewingId, setViewingId] = useState<string | null>(null);
 
@@ -155,6 +157,21 @@ export default function ExpenseListPage({
         supabase.rpc('get_procurement_employee_list'),
       ]);
       setRows((cRes.data || []) as unknown as ExpenseClaim[]);
+      const claimRows = (cRes.data || []) as unknown as ExpenseClaim[];
+      const finals: Record<string, boolean> = {};
+      await Promise.all(
+        claimRows
+          .filter((r) => r.status === 'PENDING')
+          .map(async (r) => {
+            try {
+              const ctx = await getWorkflowStepContext('expense', r.id);
+              finals[r.id] = ctx ? ctx.is_final !== false : true;
+            } catch {
+              finals[r.id] = true;
+            }
+          })
+      );
+      setExpenseStepFinal(finals);
       setCategories((catRes.data || []) as unknown as ExpenseCategory[]);
       const names: Record<string, string> = {};
       for (const e of (empRes.data || []) as NamedEmployee[]) names[e.id] = e.name;
@@ -309,7 +326,7 @@ export default function ExpenseListPage({
         if (instanceId) {
           if (action === 'APPROVE') await approveWorkflowStep(instanceId, decisionNote || undefined);
           else await rejectWorkflowStep(instanceId, decisionNote || undefined);
-          toast.success(action === 'APPROVE' ? 'Claim approved' : 'Claim rejected');
+          toast.success(action === 'APPROVE' ? (expenseStepFinal[row.id] === false ? 'Claim authorized' : 'Claim approved') : 'Claim rejected');
           setDecisionTarget(null);
           setDecisionNote('');
           setDecisionActual('');
@@ -477,7 +494,7 @@ export default function ExpenseListPage({
                     className="h-7 border-success/30 text-success hover:bg-success/10"
                     onClick={() => openDecision(r, 'APPROVE')}
                   >
-                    Approve
+                    {expenseStepFinal[r.id] === false ? 'Authorize' : 'Approve'}
                   </Button>
                   <Button
                     size="sm"
@@ -627,7 +644,7 @@ export default function ExpenseListPage({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {decisionTarget?.action === 'APPROVE' && 'Approve expense?'}
+              {decisionTarget?.action === 'APPROVE' && (decisionTarget.row && expenseStepFinal[decisionTarget.row.id] === false ? 'Authorize expense?' : 'Approve expense?')}
               {decisionTarget?.action === 'REJECT' && 'Reject expense?'}
               {decisionTarget?.action === 'RETIRE' && 'Retire / clear this expense?'}
             </AlertDialogTitle>
@@ -682,7 +699,7 @@ export default function ExpenseListPage({
               disabled={decisionSaving}
               onClick={(e) => { e.preventDefault(); runDecision(); }}
             >
-              {decisionSaving ? 'Working...' : 'Confirm'}
+              {decisionSaving ? 'Working...' : decisionTarget?.action === 'APPROVE' ? (expenseStepFinal[decisionTarget.row.id] === false ? 'Authorize' : 'Approve') : 'Confirm'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

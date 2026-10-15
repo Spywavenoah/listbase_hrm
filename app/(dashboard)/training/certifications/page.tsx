@@ -1,8 +1,9 @@
+/* eslint-disable @next/next/no-img-element */
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { ModuleListPage, type SummaryCard, type Column } from '@/components/shared/module-list-page';
-import { Award, CheckCircle, AlertTriangle, XCircle } from 'lucide-react';
+import { Award, CheckCircle, AlertTriangle, XCircle, ImagePlus, X, Loader2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -11,6 +12,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
+
+const BUCKET = 'certification-documents';
+const MAX_SIZE = 5 * 1024 * 1024;
+const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 
 interface Certification {
   id: string;
@@ -21,6 +26,7 @@ interface Certification {
   issued_at: string | null;
   expiry_date: string | null;
   document_url: string | null;
+  document_path: string | null;
 }
 
 type CertStatus = 'ACTIVE' | 'EXPIRING_SOON' | 'EXPIRED' | 'NO_EXPIRY';
@@ -47,8 +53,12 @@ export default function CertificationsPage() {
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({
-    employee_id: '', title: '', issuing_body: '', reference_no: '', issued_at: '', expiry_date: '', document_url: '',
+    employee_id: '', title: '', issuing_body: '', reference_no: '', issued_at: '', expiry_date: '',
   });
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -67,8 +77,46 @@ export default function CertificationsPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  const resetForm = () => {
+    setForm({ employee_id: '', title: '', issuing_body: '', reference_no: '', issued_at: '', expiry_date: '' });
+    setImageFile(null);
+    setImagePreview(null);
+    if (fileRef.current) fileRef.current.value = '';
+  };
+
+  const closeCreate = () => { setCreateOpen(false); resetForm(); };
+
+  const pickImage = (file: File | null) => {
+    if (!file) return;
+    if (!ALLOWED_TYPES.includes(file.type)) { toast.error('Only PNG, JPEG or WebP images are allowed'); return; }
+    if (file.size > MAX_SIZE) { toast.error('Image must be 5 MB or smaller'); return; }
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
+  };
+
+  const uploadImage = async (employeeId: string, file: File) => {
+    const ext = (file.name.split('.').pop() || 'png').toLowerCase();
+    const uuid = typeof crypto !== 'undefined' && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const path = `${employeeId}/${uuid}.${ext}`;
+    const { error } = await supabase.storage.from(BUCKET).upload(path, file, { upsert: false, contentType: file.type });
+    if (error) throw error;
+    const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
+    return { path, url: data.publicUrl };
+  };
+
   const handleCreate = async () => {
+    if (!form.employee_id || !form.title.trim()) { toast.error('Employee and title are required'); return; }
+    setUploading(true);
     try {
+      let document_url: string | null = null;
+      let document_path: string | null = null;
+      if (imageFile) {
+        const uploaded = await uploadImage(form.employee_id, imageFile);
+        document_url = uploaded.url;
+        document_path = uploaded.path;
+      }
       const { error } = await supabase.from('employee_certifications').insert({
         employee_id: form.employee_id,
         title: form.title,
@@ -76,12 +124,29 @@ export default function CertificationsPage() {
         reference_no: form.reference_no || null,
         issued_at: form.issued_at || null,
         expiry_date: form.expiry_date || null,
-        document_url: form.document_url || null,
+        document_url,
+        document_path,
       });
       if (error) throw error;
       toast.success('Certification recorded');
-      setCreateOpen(false);
-      setForm({ employee_id: '', title: '', issuing_body: '', reference_no: '', issued_at: '', expiry_date: '', document_url: '' });
+      closeCreate();
+      load();
+    } catch (err) {
+      toast.error('Failed: ' + (err as Error).message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDelete = async (c: Certification) => {
+    try {
+      const { error } = await supabase.from('employee_certifications').delete().eq('id', c.id);
+      if (error) throw error;
+      if (c.document_path) {
+        const { error: rmErr } = await supabase.storage.from(BUCKET).remove([c.document_path]);
+        if (rmErr) console.warn('Storage cleanup failed:', rmErr.message);
+      }
+      toast.success('Certification removed');
       load();
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
@@ -115,6 +180,16 @@ export default function CertificationsPage() {
     { key: 'issued_at', label: 'Issued', render: (c) => c.issued_at || '—' },
     { key: 'expiry_date', label: 'Expires', render: (c) => c.expiry_date || '—' },
     {
+      key: 'document_url', label: 'Document',
+      render: (c) => c.document_url
+        ? (
+          <a href={c.document_url} target="_blank" rel="noopener noreferrer" title="View certificate">
+            <img src={c.document_url} alt={c.title} className="h-9 w-9 rounded-md border border-border object-cover" />
+          </a>
+        )
+        : <span className="text-muted-foreground">—</span>,
+    },
+    {
       key: 'status', label: 'Status',
       render: (c) => {
         const s = certStatus(c.expiry_date);
@@ -139,17 +214,13 @@ export default function CertificationsPage() {
             size="sm"
             variant="ghost"
             className="h-7 text-destructive"
-            onClick={async () => {
-              await supabase.from('employee_certifications').delete().eq('id', c.id);
-              toast.success('Certification removed');
-              load();
-            }}
+            onClick={() => handleDelete(c)}
           >
             Delete
           </Button>
         )}
       />
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+      <Dialog open={createOpen} onOpenChange={(o) => (o ? setCreateOpen(true) : closeCreate())}>
         <DialogContent>
           <DialogHeader><DialogTitle>Record Certification</DialogTitle></DialogHeader>
           <div className="space-y-4 py-4">
@@ -187,13 +258,46 @@ export default function CertificationsPage() {
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label>Document URL</Label>
-              <Input value={form.document_url} onChange={(e) => setForm({ ...form, document_url: e.target.value })} placeholder="https://drive.google.com/..." />
+              <Label>Certificate Image</Label>
+              {imagePreview ? (
+                <div className="relative inline-block">
+                  <img src={imagePreview} alt="Certificate preview" className="h-32 w-auto rounded-lg border border-border object-cover" />
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="secondary"
+                    className="absolute -right-2 -top-2 h-7 w-7 rounded-full"
+                    onClick={() => { setImageFile(null); setImagePreview(null); if (fileRef.current) fileRef.current.value = ''; }}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => fileRef.current?.click()}
+                  className="flex w-full flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-6 text-center transition-colors hover:border-primary/50"
+                >
+                  <ImagePlus className="h-6 w-6 text-muted-foreground" />
+                  <span className="text-sm text-muted-foreground">Click to upload a certificate image</span>
+                </button>
+              )}
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="hidden"
+                onChange={(e) => pickImage(e.target.files?.[0] ?? null)}
+              />
+              <p className="text-xs text-muted-foreground">PNG, JPG or WebP — up to 5 MB.</p>
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={!form.employee_id || !form.title}>Save</Button>
+            <Button variant="outline" onClick={closeCreate} disabled={uploading}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={!form.employee_id || !form.title || uploading}>
+              {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {uploading ? 'Saving...' : 'Save'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

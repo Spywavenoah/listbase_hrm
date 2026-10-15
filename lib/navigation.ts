@@ -32,6 +32,12 @@ import {
   Receipt,
   Award,
   BookMarked,
+  MessageSquare,
+  Warehouse,
+  Boxes,
+  Tags,
+  Car,
+  Fuel,
 } from 'lucide-react';
 
 export interface NavItem {
@@ -69,6 +75,24 @@ export const ALL_PROCUREMENT_PRIVILEGES: string[] = [
   'procurement.settings',
 ];
 
+export const ALL_INVENTORY_PRIVILEGES: string[] = [
+  'inventory.view',
+  'inventory.manage',
+  'inventory.move',
+  'inventory.request',
+  'inventory.issue',
+  'inventory.settings',
+];
+
+export const ALL_ASSET_PRIVILEGES: string[] = [
+  'assets.view',
+  'assets.manage',
+  'assets.repairs',
+  'assets.fleet',
+  'assets.maintenance',
+  'assets.request',
+];
+
 export const navSections: NavSection[] = [
   {
     label: 'Dashboard',
@@ -85,6 +109,7 @@ export const navSections: NavSection[] = [
       { label: 'All Employees', href: '/employees', icon: Users, privileges: ['employees.view_all', 'employees.manage', 'employees.invite'] },
       { label: 'Add Employee', href: '/employees/add', icon: UserPlus, privileges: ['employees.manage', 'employees.invite'] },
       { label: 'Change Requests', href: '/employees/change-requests', icon: ClipboardList, privilege: 'employees.manage' },
+      { label: 'Queries', href: '/queries', icon: MessageSquare, privileges: ['employees.manage', 'admin.settings'] },
       { label: 'Organization Chart', href: '/organization/org-chart', icon: Network, privilege: 'organization.manage' },
       { label: 'Departments', href: '/organization/departments', icon: Building2, privilege: 'organization.manage' },
       { label: 'Positions', href: '/organization/positions', icon: Network, privilege: 'organization.manage' },
@@ -159,8 +184,13 @@ export const navSections: NavSection[] = [
     label: 'Assets',
     icon: Package,
     items: [
-      { label: 'Asset Catalog', href: '/assets', icon: Package },
+      { label: 'Asset Catalog', href: '/assets', icon: Package, privileges: ALL_ASSET_PRIVILEGES },
+      { label: 'Categories', href: '/assets/categories', icon: Tags, privileges: ['assets.manage', 'assets.view'] },
       { label: 'Assignments', href: '/assets/assignments', icon: ArrowRightLeft, privilege: 'assets.manage' },
+      { label: 'Repairs', href: '/assets/repairs', icon: Wrench, privileges: ['assets.repairs', 'assets.manage', 'assets.view'] },
+      { label: 'Fuel Tracking', href: '/assets/fuel', icon: Fuel, privileges: ['assets.fleet', 'assets.manage', 'assets.view'] },
+      { label: 'Maintenance', href: '/assets/maintenance', icon: CalendarClock, privileges: ['assets.maintenance', 'assets.manage', 'assets.view'] },
+      { label: 'Vehicle Requests', href: '/assets/vehicle-requests', icon: Car, privileges: ['assets.request', 'assets.manage', 'assets.view'] },
     ],
   },
   {
@@ -180,6 +210,22 @@ export const navSections: NavSection[] = [
       { label: 'Vendors', href: '/procurement/vendors', icon: Factory, privilege: 'procurement.manage' },
       { label: 'Reports', href: '/procurement/reports', icon: ChartBar, privileges: ALL_PROCUREMENT_PRIVILEGES },
       { label: 'Settings', href: '/procurement/settings', icon: Wrench, privileges: ['procurement.settings', 'procurement.manage'] },
+    ],
+  },
+  {
+    label: 'Inventory',
+    icon: Warehouse,
+    items: [
+      { label: 'Dashboard', href: '/inventory', icon: LayoutDashboard, privileges: ALL_INVENTORY_PRIVILEGES },
+      { label: 'Stock Levels', href: '/inventory/stock', icon: Boxes, privileges: ['inventory.view', 'inventory.manage', 'inventory.move', 'inventory.issue'] },
+      { label: 'Items', href: '/inventory/items', icon: Package, privileges: ['inventory.view', 'inventory.manage'] },
+      { label: 'Material Requests', href: '/inventory/material-requests', icon: Send, privileges: ['inventory.request', 'inventory.issue', 'inventory.manage'] },
+      { label: 'Expiry Alerts', href: '/inventory/expiry', icon: CalendarClock, privileges: ['inventory.view', 'inventory.manage', 'inventory.move', 'inventory.issue'] },
+      { label: 'Movements', href: '/inventory/movements', icon: ClipboardList, privileges: ['inventory.view', 'inventory.manage', 'inventory.move'] },
+      { label: 'Transfers', href: '/inventory/transfers', icon: ArrowRightLeft, privileges: ['inventory.move', 'inventory.manage'] },
+      { label: 'Warehouses', href: '/inventory/warehouses', icon: Warehouse, privileges: ['inventory.manage', 'inventory.settings'] },
+      { label: 'Categories', href: '/inventory/categories', icon: Tags, privileges: ['inventory.manage', 'inventory.settings'] },
+      { label: 'Reports', href: '/inventory/reports', icon: ChartBar, privileges: ['inventory.view', 'inventory.manage'] },
     ],
   },
   {

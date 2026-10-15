@@ -473,6 +473,7 @@ export default function PersonalPage() {
             onChange={setEmpCustomValue}
             disabled={locked}
           />
+          </fieldset>
 
           <div className="flex items-center justify-between gap-4 border-t border-border pt-4">
             {locked ? (
@@ -494,7 +495,6 @@ export default function PersonalPage() {
               </div>
             )}
           </div>
-        </fieldset>
         </CardContent>
       </Card>
 

@@ -23,6 +23,8 @@ interface Receipt {
   received_by: string | null;
   delivery_note_number: string | null;
   warehouse: string | null;
+  warehouse_id: string | null;
+  inventory_posted: boolean;
   status: string;
   notes: string | null;
   created_at: string;
@@ -58,6 +60,7 @@ interface POItem {
   unit_price: number;
 }
 interface Vendor { id: string; name: string }
+interface Warehouse { id: string; name: string; is_default: boolean }
 
 export default function ReceiptsPage() {
   const { employee } = useAccess();
@@ -66,6 +69,7 @@ export default function ReceiptsPage() {
   const [pos, setPos] = useState<PO[]>([]);
   const [poItems, setPoItems] = useState<POItem[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [employeeNames, setEmployeeNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
 
@@ -76,19 +80,20 @@ export default function ReceiptsPage() {
   const [receiveLines, setReceiveLines] = useState<Record<string, { received: number; rejected: number; reason: string }>>({});
   const [receiptDate, setReceiptDate] = useState('');
   const [deliveryNote, setDeliveryNote] = useState('');
-  const [warehouse, setWarehouse] = useState('');
+  const [warehouseId, setWarehouseId] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [rRes, iRes, pRes, piRes, vRes, empRes] = await Promise.all([
+      const [rRes, iRes, pRes, piRes, vRes, wRes, empRes] = await Promise.all([
         supabase.from('procurement_receipts').select('*').order('created_at', { ascending: false }),
         supabase.from('procurement_receipt_items').select('*'),
         supabase.from('purchase_orders').select('id, po_number, vendor_id, status, currency').in('status', ['APPROVED', 'PARTIALLY_RECEIVED', 'RECEIVED']).order('created_at', { ascending: false }),
         supabase.from('purchase_order_items').select('*').order('created_at', { ascending: true }),
         supabase.from('procurement_vendors').select('id, name'),
+        supabase.from('inventory_warehouses').select('id, name, is_default').eq('is_active', true).order('name'),
         supabase.rpc('get_procurement_employee_list'),
       ]);
       setRows((rRes.data || []) as unknown as Receipt[]);
@@ -100,6 +105,7 @@ export default function ReceiptsPage() {
       setPos(pRes.data || []);
       setPoItems((piRes.data || []) as unknown as POItem[]);
       setVendors(vRes.data || []);
+      setWarehouses((wRes.data || []) as unknown as Warehouse[]);
       const names: Record<string, string> = {};
       for (const e of (empRes.data || []) as { id: string; name: string }[]) names[e.id] = e.name;
       setEmployeeNames(names);
@@ -114,6 +120,7 @@ export default function ReceiptsPage() {
 
   const poNumber = (id: string) => pos.find((p) => p.id === id)?.po_number || '—';
   const vendorName = (id: string | null) => vendors.find((v) => v.id === id)?.name || '—';
+  const warehouseName = (id: string | null) => warehouses.find((w) => w.id === id)?.name || null;
 
   const today = () => new Date().toISOString().split('T')[0];
 
@@ -121,7 +128,7 @@ export default function ReceiptsPage() {
     setSelectedPoId(poId);
     setReceiptDate(today());
     setDeliveryNote('');
-    setWarehouse('');
+    setWarehouseId(warehouses.find((w) => w.is_default)?.id || warehouses[0]?.id || '');
     setNotes('');
     const lines: Record<string, { received: number; rejected: number; reason: string }> = {};
     for (const it of poItems.filter((p) => p.purchase_order_id === poId)) {
@@ -159,7 +166,8 @@ export default function ReceiptsPage() {
         received_date: receiptDate || today(),
         received_by: employee?.id || null,
         delivery_note_number: deliveryNote || null,
-        warehouse: warehouse || null,
+        warehouse: warehouseName(warehouseId) || null,
+        warehouse_id: warehouseId || null,
         status: 'RECEIVED',
         notes: notes || null,
       }).select().single();
@@ -206,7 +214,20 @@ export default function ReceiptsPage() {
         closed_at: fullyReceived ? new Date().toISOString() : null,
       }).eq('id', selectedPoId);
 
-      toast.success(`Goods receipt ${number} recorded against ${poNumber(selectedPoId)} (vendor: ${vendorName(anyReceived?.vendor_id)})`);
+      let postedCount = 0;
+      try {
+        const { data: posted, error: pe } = await supabase.rpc('post_receipt_to_inventory', {
+          p_receipt_id: receipt.id,
+          p_warehouse_id: warehouseId || null,
+        });
+        if (pe) throw pe;
+        postedCount = Number(posted) || 0;
+      } catch (pe) {
+        toast.warning('Receipt recorded, but it could not be posted to inventory: ' + (pe as Error).message);
+      }
+
+      const invNote = postedCount > 0 ? ` · ${postedCount} line(s) posted to inventory` : '';
+      toast.success(`Goods receipt ${number} recorded against ${poNumber(selectedPoId)} (vendor: ${vendorName(anyReceived?.vendor_id)})${invNote}`);
       setCreateOpen(false);
       load();
     } catch (err) {
@@ -225,7 +246,7 @@ export default function ReceiptsPage() {
   const columns: Column<Receipt>[] = [
     { key: 'receipt_number', label: 'Receipt', render: (r) => <span className="font-medium">{r.receipt_number}</span> },
     { key: 'po_id', label: 'PO', render: (r) => <span className="font-mono text-xs">{poNumber(r.po_id)}</span>, searchText: (r) => [poNumber(r.po_id)] },
-    { key: 'warehouse', label: 'Warehouse', render: (r) => r.warehouse || '—' },
+    { key: 'warehouse', label: 'Warehouse', render: (r) => warehouseName(r.warehouse_id) || r.warehouse || '—' },
     { key: 'received_date', label: 'Received' },
     { key: 'received_by', label: 'Received By', render: (r) => (r.received_by ? employeeNames[r.received_by] || '—' : '—'), searchText: (r) => (r.received_by ? [employeeNames[r.received_by] || ''] : []) },
     {
@@ -237,6 +258,7 @@ export default function ReceiptsPage() {
       },
     },
     { key: 'status', label: 'Status', render: (r) => <Badge variant="outline" className={procStatusClass(r.status)}>{r.status.replace(/_/g, ' ')}</Badge> },
+    { key: 'inventory_posted', label: 'Inventory', render: (r) => r.inventory_posted ? <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200">Posted</Badge> : <span className="text-muted-foreground">—</span> },
   ];
 
   const selectedLines = selectedPoId ? poItems.filter((p) => p.purchase_order_id === selectedPoId) : [];
@@ -283,7 +305,16 @@ export default function ReceiptsPage() {
               </div>
               <div className="space-y-1.5">
                 <Label>Warehouse</Label>
-                <Input value={warehouse} onChange={(e) => setWarehouse(e.target.value)} />
+                <Select value={warehouseId} onValueChange={setWarehouseId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select warehouse" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {warehouses.map((w) => (
+                      <SelectItem key={w.id} value={w.id}>{w.name}{w.is_default ? ' (default)' : ''}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-1.5">
                 <Label>Date</Label>
@@ -399,7 +430,8 @@ export default function ReceiptsPage() {
                   <p>Received: <span className="font-medium">{row.received_date}</span></p>
                   <p>Received by: <span className="font-medium">{row.received_by ? employeeNames[row.received_by] || '—' : '—'}</span></p>
                   <p>Delivery note: <span className="font-medium">{row.delivery_note_number || '—'}</span></p>
-                  <p>Warehouse: <span className="font-medium">{row.warehouse || '—'}</span></p>
+                  <p>Warehouse: <span className="font-medium">{warehouseName(row.warehouse_id) || row.warehouse || '—'}</span></p>
+                  <p>Inventory: <span className="font-medium">{row.inventory_posted ? 'Posted to stock' : 'Not posted'}</span></p>
                 </div>
                 {row.notes && <p className="text-sm text-muted-foreground">{row.notes}</p>}
                 {its.length === 0 && <p className="text-sm text-muted-foreground">No items on this receipt.</p>}

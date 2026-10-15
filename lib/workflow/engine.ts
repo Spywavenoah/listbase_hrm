@@ -12,6 +12,8 @@ export interface PendingApproval {
   workflow_name: string;
   step_title: string;
   step_order: number;
+  total_steps?: number;
+  is_final?: boolean;
 }
 
 export async function fetchPendingApprovals(): Promise<PendingApproval[]> {
@@ -61,6 +63,25 @@ export async function getPendingWorkflowInstance(
   });
   if (error) throw error;
   return (data as string) || null;
+}
+
+export interface WorkflowStepContext {
+  instance_id: string | null;
+  step_order: number | null;
+  total_steps: number;
+  is_final: boolean;
+}
+
+export async function getWorkflowStepContext(
+  moduleKey: string,
+  recordId: string
+): Promise<WorkflowStepContext | null> {
+  const { data, error } = await supabase.rpc('get_workflow_step_context', {
+    p_module_key: moduleKey,
+    p_record_id: recordId,
+  });
+  if (error) throw error;
+  return (data as WorkflowStepContext) || null;
 }
 
 export interface WorkflowActorCandidate {
@@ -128,4 +149,6 @@ export const WORKFLOW_MODULE_LABELS: Record<string, string> = {
   'procurement.invoice': 'Invoice',
   'procurement.payment': 'Payment Request',
   'recruitment.requisition': 'Recruitment Requisition',
+  'inventory.material_request': 'Material Request',
+  'assets.vehicle_request': 'Vehicle Request',
 };

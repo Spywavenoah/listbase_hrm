@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { ModuleListPage, type SummaryCard, type Column } from '@/components/shared/module-list-page';
-import { Layers, TrendingUp, TrendingDown, CheckCircle } from 'lucide-react';
+import { Layers, TrendingUp, TrendingDown, CheckCircle, Eye } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -34,12 +34,25 @@ interface EmployeeOption {
 
 const ALL_EMPLOYEES = '__all__';
 
+const EMPTY_FORM = {
+  name: '',
+  code: '',
+  component_type: 'EARNING',
+  calculation_type: 'FIXED',
+  formula: '',
+  is_taxable: false,
+  employee_id: null as string | null,
+};
+
 export default function PayComponentsPage() {
   const [components, setComponents] = useState<PayComponent[]>([]);
   const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', code: '', component_type: 'EARNING', calculation_type: 'FIXED', formula: '', is_taxable: false, employee_id: null as string | null });
+  const [editing, setEditing] = useState<PayComponent | null>(null);
+  const [viewTarget, setViewTarget] = useState<PayComponent | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ ...EMPTY_FORM });
 
   const load = useCallback(async () => {
     try {
@@ -65,25 +78,59 @@ export default function PayComponentsPage() {
     return emp ? `${emp.first_name} ${emp.last_name}` : '—';
   };
 
-  const handleCreate = async () => {
+  const openCreate = () => {
+    setEditing(null);
+    setForm({ ...EMPTY_FORM });
+    setCreateOpen(true);
+  };
+
+  const openEdit = (c: PayComponent) => {
+    setEditing(c);
+    setForm({
+      name: c.name,
+      code: c.code,
+      component_type: c.component_type,
+      calculation_type: c.calculation_type,
+      formula: c.formula || '',
+      is_taxable: c.is_taxable,
+      employee_id: c.employee_id,
+    });
+    setCreateOpen(true);
+  };
+
+  const closeDialog = () => {
+    setCreateOpen(false);
+    setEditing(null);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
     try {
-      const { error } = await supabase.from('pay_components').insert({
+      const payload = {
         name: form.name,
         code: form.code.toUpperCase(),
         component_type: form.component_type,
         calculation_type: form.calculation_type,
         formula: form.formula || null,
         is_taxable: form.is_taxable,
-        is_active: true,
         employee_id: form.employee_id,
-      });
-      if (error) throw error;
-      toast.success('Pay component created');
-      setCreateOpen(false);
-      setForm({ name: '', code: '', component_type: 'EARNING', calculation_type: 'FIXED', formula: '', is_taxable: false, employee_id: null });
+      };
+      if (editing) {
+        const { error } = await supabase.from('pay_components').update(payload).eq('id', editing.id);
+        if (error) throw error;
+        toast.success('Pay component updated');
+      } else {
+        const { error } = await supabase.from('pay_components').insert({ ...payload, is_active: true });
+        if (error) throw error;
+        toast.success('Pay component created');
+      }
+      closeDialog();
+      setForm({ ...EMPTY_FORM });
       load();
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -125,13 +172,23 @@ export default function PayComponentsPage() {
         summaryCards={summaryCards}
         columns={columns}
         data={components}
+        loading={loading}
         searchPlaceholder="Search pay components..."
         createLabel="Add Component"
-        onCreate={() => setCreateOpen(true)}
+        onCreate={openCreate}
+        rowActions={(c) => (
+          <div className="flex items-center gap-1">
+            <Button size="sm" variant="ghost" onClick={() => setViewTarget(c)}>
+              <Eye className="mr-1 h-3.5 w-3.5" /> View
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => openEdit(c)}>Update</Button>
+          </div>
+        )}
       />
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+
+      <Dialog open={createOpen} onOpenChange={(o) => { if (!o && !saving) closeDialog(); }}>
         <DialogContent>
-          <DialogHeader><DialogTitle>Add Pay Component</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>{editing ? `Update Pay Component — ${editing.code}` : 'Add Pay Component'}</DialogTitle></DialogHeader>
           <div className="space-y-4 py-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
@@ -196,8 +253,54 @@ export default function PayComponentsPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={!form.name || !form.code}>Create</Button>
+            <Button variant="outline" onClick={closeDialog} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving || !form.name || !form.code}>
+              {saving ? 'Saving...' : editing ? 'Save Changes' : 'Create'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!viewTarget} onOpenChange={(o) => { if (!o) setViewTarget(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader><DialogTitle>{viewTarget?.name}</DialogTitle></DialogHeader>
+          {viewTarget && (
+            <dl className="space-y-3 text-sm">
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-muted-foreground">Code</dt>
+                <dd className="font-mono">{viewTarget.code}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-muted-foreground">Type</dt>
+                <dd><Badge variant="outline" className={typeColors[viewTarget.component_type] || ''}>{viewTarget.component_type}</Badge></dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-muted-foreground">Calculation</dt>
+                <dd>{viewTarget.calculation_type}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-muted-foreground">Formula</dt>
+                <dd>{viewTarget.formula || '—'}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-muted-foreground">Applies to</dt>
+                <dd>{employeeName(viewTarget.employee_id)}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-muted-foreground">Taxable</dt>
+                <dd><Badge variant="outline" className={viewTarget.is_taxable ? 'bg-warning/10 text-warning' : 'bg-muted text-muted-foreground'}>{viewTarget.is_taxable ? 'Yes' : 'No'}</Badge></dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-muted-foreground">Status</dt>
+                <dd><Badge variant="outline" className={viewTarget.is_active ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground'}>{viewTarget.is_active ? 'Active' : 'Inactive'}</Badge></dd>
+              </div>
+            </dl>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setViewTarget(null)}>Close</Button>
+            {viewTarget && (
+              <Button onClick={() => { const c = viewTarget; setViewTarget(null); openEdit(c); }}>Update</Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

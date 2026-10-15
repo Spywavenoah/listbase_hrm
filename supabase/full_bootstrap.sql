@@ -11459,6 +11459,3202 @@ ALTER TABLE pay_components
 CREATE INDEX IF NOT EXISTS idx_pay_components_employee ON pay_components(employee_id);
 
 -- ===========================================================================
+-- 20261017000001_items_and_vendor_services.sql
+-- ===========================================================================
+
+-- Items master + vendor services/tags.
+--
+-- 1. `items` master table (CRUD). Feeds the item dropdowns used by procurement
+--    requisitions, purchase orders and quotations (and future material/inventory
+--    modules).
+-- 2. Optional `item_id` links on the procurement line-item tables so a chosen
+--    master item can be referenced alongside its free-text name.
+-- 3. `procurement_vendors.services` / `.tags` arrays for filtering vendors that
+--    sell similar items.
+
+-- ============================================================
+-- 1. Items master
+-- ============================================================
+CREATE TABLE IF NOT EXISTS items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  sku text,
+  category text,
+  uom text DEFAULT 'EA',
+  description text,
+  unit_price numeric(14,2) NOT NULL DEFAULT 0,
+  is_active boolean NOT NULL DEFAULT true,
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_items_name ON items (lower(name));
+CREATE INDEX IF NOT EXISTS idx_items_category ON items (category);
+CREATE INDEX IF NOT EXISTS idx_items_active ON items (is_active);
+
+ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "select_items" ON items;
+DROP POLICY IF EXISTS "insert_items" ON items;
+DROP POLICY IF EXISTS "update_items" ON items;
+DROP POLICY IF EXISTS "delete_items" ON items;
+
+-- Everyone signed in can read the catalogue (needed for dropdowns).
+CREATE POLICY "select_items" ON items FOR SELECT TO authenticated USING (true);
+
+CREATE POLICY "insert_items" ON items FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_privilege(ARRAY['procurement.manage', 'inventory.manage', 'admin.settings']));
+
+CREATE POLICY "update_items" ON items FOR UPDATE TO authenticated
+  USING (public.has_any_privilege(ARRAY['procurement.manage', 'inventory.manage', 'admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['procurement.manage', 'inventory.manage', 'admin.settings']));
+
+CREATE POLICY "delete_items" ON items FOR DELETE TO authenticated
+  USING (public.has_any_privilege(ARRAY['procurement.manage', 'inventory.manage', 'admin.settings']));
+
+-- Keep updated_at fresh.
+CREATE OR REPLACE FUNCTION public.touch_items_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_touch_items_updated_at ON items;
+CREATE TRIGGER trg_touch_items_updated_at
+BEFORE UPDATE ON items
+FOR EACH ROW EXECUTE FUNCTION public.touch_items_updated_at();
+
+-- Seed a small starter catalogue (idempotent).
+INSERT INTO items (name, sku, category, uom, unit_price)
+VALUES
+  ('A4 Paper Ream', 'STA-0001', 'Stationery', 'REAM', 4.50),
+  ('Ballpoint Pen (Blue)', 'STA-0002', 'Stationery', 'EA', 0.60),
+  ('Toner Cartridge', 'ICT-0001', 'ICT Consumables', 'EA', 65.00),
+  ('Laptop - 14"', 'ICT-0002', 'ICT Equipment', 'EA', 950.00),
+  ('Office Chair', 'FUR-0001', 'Furniture', 'EA', 120.00)
+ON CONFLICT DO NOTHING;
+
+-- ============================================================
+-- 2. Link master items to procurement line items
+-- ============================================================
+ALTER TABLE procurement_requisition_items
+  ADD COLUMN IF NOT EXISTS item_id uuid REFERENCES items(id) ON DELETE SET NULL;
+ALTER TABLE purchase_order_items
+  ADD COLUMN IF NOT EXISTS item_id uuid REFERENCES items(id) ON DELETE SET NULL;
+ALTER TABLE procurement_quotation_items
+  ADD COLUMN IF NOT EXISTS item_id uuid REFERENCES items(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_requisition_items_item ON procurement_requisition_items (item_id);
+CREATE INDEX IF NOT EXISTS idx_po_items_item ON purchase_order_items (item_id);
+CREATE INDEX IF NOT EXISTS idx_quotation_items_item ON procurement_quotation_items (item_id);
+
+-- ============================================================
+-- 3. Vendor services + tags
+-- ============================================================
+ALTER TABLE procurement_vendors
+  ADD COLUMN IF NOT EXISTS services text[] NOT NULL DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';
+
+CREATE INDEX IF NOT EXISTS idx_vendors_services ON procurement_vendors USING GIN (services);
+CREATE INDEX IF NOT EXISTS idx_vendors_tags ON procurement_vendors USING GIN (tags);
+
+-- ===========================================================================
+-- 20261017000002_notifications.sql
+-- ===========================================================================
+
+-- In-app (live) notifications + email hooks.
+--
+-- Adds a `notifications` table for per-employee in-app notifications, published
+-- over Supabase Realtime. Triggers populate it (and enqueue email where useful)
+-- for:
+--   * workflow status changes  -> notify the requester
+--   * a workflow step becoming actionable -> notify the pending approver
+--   * a task being assigned    -> notify the assignee
+
+-- ============================================================
+-- 1. Table
+-- ============================================================
+CREATE TABLE IF NOT EXISTS notifications (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  employee_id uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  title text NOT NULL,
+  message text,
+  type text NOT NULL DEFAULT 'INFO',      -- INFO | SUCCESS | WARNING | ERROR
+  link text,
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  is_read boolean NOT NULL DEFAULT false,
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_employee
+  ON notifications (employee_id, is_read, created_at DESC);
+
+ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "select_notifications" ON notifications;
+DROP POLICY IF EXISTS "update_notifications" ON notifications;
+DROP POLICY IF EXISTS "delete_notifications" ON notifications;
+
+CREATE POLICY "select_notifications" ON notifications FOR SELECT TO authenticated
+  USING (employee_id = public.current_employee_id());
+
+CREATE POLICY "update_notifications" ON notifications FOR UPDATE TO authenticated
+  USING (employee_id = public.current_employee_id())
+  WITH CHECK (employee_id = public.current_employee_id());
+
+CREATE POLICY "delete_notifications" ON notifications FOR DELETE TO authenticated
+  USING (employee_id = public.current_employee_id() OR public.has_privilege('admin.settings'));
+
+-- Publish for live updates (idempotent).
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+     WHERE pubname = 'supabase_realtime' AND tablename = 'notifications'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE notifications;
+  END IF;
+END;
+$$;
+
+-- ============================================================
+-- 2. Helpers
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.create_notification(
+  p_employee_id uuid,
+  p_title text,
+  p_message text DEFAULT NULL,
+  p_type text DEFAULT 'INFO',
+  p_link text DEFAULT NULL,
+  p_metadata jsonb DEFAULT '{}'::jsonb
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_id uuid;
+BEGIN
+  IF p_employee_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+  INSERT INTO notifications (employee_id, title, message, type, link, metadata)
+  VALUES (p_employee_id, p_title, p_message, COALESCE(p_type, 'INFO'), p_link, COALESCE(p_metadata, '{}'::jsonb))
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_notification(uuid, text, text, text, text, jsonb) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.create_notification(uuid, text, text, text, text, jsonb) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION public.mark_notification_read(p_id uuid)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  UPDATE notifications SET is_read = true
+   WHERE id = p_id AND employee_id = public.current_employee_id();
+$$;
+
+CREATE OR REPLACE FUNCTION public.mark_all_notifications_read()
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  UPDATE notifications SET is_read = true
+   WHERE employee_id = public.current_employee_id() AND is_read = false;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.mark_notification_read(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.mark_all_notifications_read() TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.mark_notification_read(uuid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.mark_all_notifications_read() FROM PUBLIC;
+
+-- ============================================================
+-- 3. Workflow status change -> notify requester (in-app + email)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.notify_workflow_result()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_module_label text;
+  v_requester uuid;
+  v_email text;
+  v_name text;
+  v_status_label text;
+  v_title text;
+  v_message text;
+  v_link text;
+BEGIN
+  IF NEW.status NOT IN ('APPROVED', 'REJECTED')
+     OR OLD.status IS NOT DISTINCT FROM NEW.status THEN
+    RETURN NEW;
+  END IF;
+
+  v_requester := NEW.initiated_by;
+  IF v_requester IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  v_module_label := CASE NEW.module_key
+    WHEN 'leave' THEN 'Leave Request'
+    WHEN 'leave.encashment' THEN 'Leave Encashment'
+    WHEN 'expense' THEN 'Expense Request'
+    WHEN 'travel' THEN 'Travel Request'
+    WHEN 'offboarding' THEN 'Offboarding'
+    WHEN 'employee' THEN 'Record Change'
+    WHEN 'employee.change_request' THEN 'Profile Change Request'
+    WHEN 'procurement.requisition' THEN 'Requisition'
+    WHEN 'procurement.purchase_order' THEN 'Purchase Order'
+    WHEN 'procurement.invoice' THEN 'Invoice'
+    WHEN 'procurement.payment' THEN 'Payment Request'
+    WHEN 'recruitment.requisition' THEN 'Recruitment Requisition'
+    ELSE initcap(replace(NEW.module_key, '_', ' '))
+  END;
+
+  v_status_label := CASE NEW.status WHEN 'APPROVED' THEN 'approved' ELSE 'rejected' END;
+  v_title := v_module_label || ' ' || v_status_label;
+  v_message := 'Your ' || lower(v_module_label) || ' has been ' || v_status_label || '.';
+
+  v_link := CASE
+    WHEN NEW.module_key = 'leave' THEN '/leave'
+    WHEN NEW.module_key = 'leave.encashment' THEN '/leave/encashments'
+    WHEN NEW.module_key = 'expense' THEN '/expenses'
+    WHEN NEW.module_key IN ('employee', 'employee.change_request')
+      THEN '/employees/' || COALESCE(NEW.initiated_by::text, '') || '/personal'
+    WHEN NEW.module_key = 'procurement.requisition' THEN '/procurement/requisitions'
+    WHEN NEW.module_key = 'procurement.purchase_order' THEN '/procurement/purchase-orders'
+    ELSE '/dashboard'
+  END;
+
+  PERFORM public.create_notification(
+    v_requester,
+    v_title,
+    v_message,
+    CASE NEW.status WHEN 'APPROVED' THEN 'SUCCESS' ELSE 'WARNING' END,
+    v_link,
+    jsonb_build_object('workflow_instance_id', NEW.id::text, 'module_key', NEW.module_key,
+                       'record_id', NEW.record_id::text, 'status', NEW.status)
+  );
+
+  SELECT email, trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))
+    INTO v_email, v_name
+    FROM employees WHERE id = v_requester;
+
+  IF v_email IS NOT NULL AND btrim(v_email) <> '' THEN
+    INSERT INTO notification_queue (event_key, recipient_email, recipient_name, subject, body_html, status, metadata)
+    VALUES (
+      'request.' || v_status_label,
+      v_email,
+      NULLIF(btrim(v_name), ''),
+      v_title,
+      '<p>Hi ' || COALESCE(v_name, 'there') || ',</p>' ||
+      '<p>Your <strong>' || v_module_label || '</strong> has been <strong>' || v_status_label || '</strong>.</p>' ||
+      '<p>Open HR Flow to view the details.</p>',
+      'PENDING',
+      jsonb_build_object('workflow_instance_id', NEW.id::text, 'module_key', NEW.module_key,
+                         'record_id', NEW.record_id::text, 'status', NEW.status)
+    );
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_notify_workflow_result ON workflow_instances;
+CREATE TRIGGER trg_notify_workflow_result
+AFTER UPDATE ON workflow_instances
+FOR EACH ROW EXECUTE FUNCTION public.notify_workflow_result();
+
+-- ============================================================
+-- 4. Task assignment -> notify assignee (in-app + email)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.notify_task_assigned()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_email text;
+  v_name text;
+  v_assigner text;
+BEGIN
+  IF NEW.employee_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))
+    INTO v_assigner
+    FROM employees WHERE id = NEW.assigned_by;
+
+  PERFORM public.create_notification(
+    NEW.employee_id,
+    'New task assigned',
+    COALESCE(v_assigner || ' assigned you a task: ', 'A task was assigned to you: ') || NEW.title,
+    'INFO',
+    '/employees/' || NEW.employee_id::text || '/tasks',
+    jsonb_build_object('task_id', NEW.id::text, 'priority', NEW.priority)
+  );
+
+  SELECT email, trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))
+    INTO v_email, v_name
+    FROM employees WHERE id = NEW.employee_id;
+
+  IF v_email IS NOT NULL AND btrim(v_email) <> '' THEN
+    INSERT INTO notification_queue (event_key, recipient_email, recipient_name, subject, body_html, status, metadata)
+    VALUES (
+      'task.assigned',
+      v_email,
+      NULLIF(btrim(v_name), ''),
+      'New task assigned: ' || NEW.title,
+      '<p>Hi ' || COALESCE(v_name, 'there') || ',</p>' ||
+      '<p>' || COALESCE(v_assigner || ' has', 'You have been') || ' assigned you a task:</p>' ||
+      '<p><strong>' || NEW.title || '</strong></p>' ||
+      COALESCE('<p>' || NEW.description || '</p>', '') ||
+      '<p>Priority: ' || NEW.priority || CASE WHEN NEW.due_date IS NOT NULL THEN ' • Due: ' || NEW.due_date::text ELSE '' END || '</p>',
+      'PENDING',
+      jsonb_build_object('task_id', NEW.id::text, 'priority', NEW.priority)
+    );
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_notify_task_assigned ON employee_tasks;
+CREATE TRIGGER trg_notify_task_assigned
+AFTER INSERT ON employee_tasks
+FOR EACH ROW EXECUTE FUNCTION public.notify_task_assigned();
+
+-- ============================================================
+-- 5. Workflow step actionable -> in-app notification for approver
+--    (enqueue_workflow_step_email already sends the email; add in-app too)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.enqueue_workflow_step_email(p_instance_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_instance workflow_instances%ROWTYPE;
+  v_step workflow_steps%ROWTYPE;
+  v_has_next boolean;
+  v_actor uuid;
+  v_email text;
+  v_name text;
+  v_requester_name text;
+  v_module_label text;
+  v_already_mailed boolean;
+BEGIN
+  SELECT * INTO v_instance FROM workflow_instances WHERE id = p_instance_id;
+  IF NOT FOUND OR v_instance.status <> 'PENDING' THEN
+    RETURN;
+  END IF;
+
+  SELECT * INTO v_step FROM workflow_steps WHERE id = v_instance.current_step_id;
+  IF v_step.id IS NULL THEN
+    RETURN;
+  END IF;
+
+  SELECT EXISTS (
+    SELECT 1 FROM workflow_steps ws2
+     WHERE ws2.workflow_definition_id = v_instance.workflow_definition_id
+       AND ws2.sort_order > v_step.sort_order
+  ) INTO v_has_next;
+
+  v_actor := CASE
+    WHEN v_has_next THEN v_instance.authorizer_user_id
+    ELSE COALESCE(v_instance.approver_user_id, v_instance.authorizer_user_id)
+  END;
+  IF v_actor IS NULL THEN
+    v_actor := v_step.approver_user_id;
+  END IF;
+  IF v_actor IS NULL THEN
+    RETURN;
+  END IF;
+
+  v_module_label := CASE v_instance.module_key
+    WHEN 'leave' THEN 'Leave Request'
+    WHEN 'leave.encashment' THEN 'Leave Encashment'
+    WHEN 'expense' THEN 'Expense Request'
+    WHEN 'travel' THEN 'Travel Request'
+    WHEN 'offboarding' THEN 'Offboarding'
+    WHEN 'employee' THEN 'Record Change'
+    WHEN 'procurement.requisition' THEN 'Requisition'
+    WHEN 'procurement.purchase_order' THEN 'Purchase Order'
+    WHEN 'procurement.invoice' THEN 'Invoice'
+    WHEN 'procurement.payment' THEN 'Payment Request'
+    WHEN 'recruitment.requisition' THEN 'Recruitment Requisition'
+    ELSE initcap(replace(v_instance.module_key, '_', ' '))
+  END;
+
+  SELECT trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))
+    INTO v_requester_name
+    FROM employees WHERE id = v_instance.initiated_by;
+
+  -- In-app notification for the pending approver (once per instance).
+  IF NOT EXISTS (
+    SELECT 1 FROM notifications
+     WHERE employee_id = v_actor
+       AND metadata @> jsonb_build_object('workflow_instance_id', p_instance_id::text)
+  ) THEN
+    PERFORM public.create_notification(
+      v_actor,
+      v_module_label || ' awaiting your approval',
+      COALESCE(v_requester_name, 'An employee') || ' submitted a ' || v_module_label || ' for your review.',
+      'INFO',
+      '/approvals',
+      jsonb_build_object('workflow_instance_id', p_instance_id::text,
+                         'module_key', v_instance.module_key, 'record_id', v_instance.record_id::text)
+    );
+  END IF;
+
+  -- Email (once per instance).
+  SELECT EXISTS (
+    SELECT 1 FROM notification_queue
+     WHERE metadata @> jsonb_build_object('workflow_instance_id', p_instance_id::text)
+       AND event_key = 'request.submitted'
+  ) INTO v_already_mailed;
+  IF v_already_mailed THEN
+    RETURN;
+  END IF;
+
+  SELECT email, trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))
+    INTO v_email, v_name
+    FROM employees WHERE id = v_actor;
+
+  IF v_email IS NULL OR btrim(v_email) = '' THEN
+    RETURN;
+  END IF;
+
+  INSERT INTO notification_queue (
+    event_key, recipient_email, recipient_name, subject, body_html, status, metadata
+  ) VALUES (
+    'request.submitted',
+    v_email,
+    NULLIF(btrim(v_name), ''),
+    v_module_label || ' awaiting your approval',
+    '<p>Hi ' || COALESCE(v_name, 'there') || ',</p>' ||
+    '<p><strong>' || COALESCE(v_requester_name, 'An employee') || '</strong> submitted a <strong>' ||
+    v_module_label || '</strong> that requires your approval.</p>' ||
+    '<p>Please review it in the HR Flow approvals inbox.</p>',
+    'PENDING',
+    jsonb_build_object(
+      'workflow_instance_id', p_instance_id::text,
+      'module_key', v_instance.module_key,
+      'record_id', v_instance.record_id::text,
+      'requester_name', v_requester_name,
+      'module_label', v_module_label
+    )
+  );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.enqueue_workflow_step_email(uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.enqueue_workflow_step_email(uuid) FROM PUBLIC;
+
+-- ===========================================================================
+-- 20261017000003_workflow_step_context.sql
+-- ===========================================================================
+
+-- Workflow step context: support "Authorize" (step 1) vs "Approve" (final step).
+--
+-- Adds `is_final` / `total_steps` to `pending_approvals()` so the UI can label
+-- the step-1 action "Authorize" and only the final step "Approve". Also adds
+-- `get_workflow_step_context(module_key, record_id)` for the module pages that
+-- act on a workflow directly (change requests, expense claims).
+
+-- ============================================================
+-- 1. pending_approvals() with step context
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.pending_approvals()
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_caller_id uuid := public.current_employee_id();
+  v_caller_role text;
+  v_rows jsonb := '[]'::jsonb;
+  v_instance RECORD;
+  v_requester_name text;
+  v_step_title text;
+  v_step_ord integer;
+  v_total integer;
+  v_def_name text;
+BEGIN
+  IF v_caller_id IS NULL THEN
+    RETURN '[]'::jsonb;
+  END IF;
+
+  SELECT role INTO v_caller_role FROM employees WHERE id = v_caller_id;
+  v_caller_role := COALESCE(v_caller_role, '');
+
+  FOR v_instance IN
+    SELECT wi.id, wi.module_key, wi.record_id, wi.status, wi.initiated_by, wi.initiated_at,
+           wi.workflow_definition_id, wi.current_step_id
+      FROM workflow_instances wi
+     WHERE wi.status = 'PENDING'
+       AND wi.initiated_by IS DISTINCT FROM v_caller_id
+       AND (
+            public.has_privilege('admin.settings')
+         OR EXISTS (
+              SELECT 1 FROM workflow_steps ws
+               WHERE ws.id = wi.current_step_id
+                 AND (
+                   (
+                     (wi.authorizer_user_id IS NOT NULL OR wi.approver_user_id IS NOT NULL)
+                     AND CASE
+                           WHEN EXISTS (SELECT 1 FROM workflow_steps ws2
+                                         WHERE ws2.workflow_definition_id = wi.workflow_definition_id
+                                           AND ws2.sort_order > ws.sort_order)
+                             THEN wi.authorizer_user_id = v_caller_id
+                           ELSE COALESCE(wi.approver_user_id, wi.authorizer_user_id) = v_caller_id
+                         END
+                   )
+                   OR (
+                     wi.authorizer_user_id IS NULL AND wi.approver_user_id IS NULL
+                     AND (ws.approver_user_id = v_caller_id OR ws.approver_role = v_caller_role)
+                   )
+                 )
+            )
+       )
+     ORDER BY wi.initiated_at ASC
+  LOOP
+    SELECT COALESCE(e.first_name || ' ' || e.last_name, '')
+      INTO v_requester_name
+      FROM employees e WHERE e.id = v_instance.initiated_by;
+
+    SELECT ws.sort_order INTO v_step_ord
+      FROM workflow_steps ws WHERE ws.id = v_instance.current_step_id;
+
+    SELECT count(*) INTO v_total
+      FROM workflow_steps ws
+     WHERE ws.workflow_definition_id = v_instance.workflow_definition_id;
+
+    SELECT name INTO v_def_name FROM workflow_definitions WHERE id = v_instance.workflow_definition_id;
+    v_def_name := COALESCE(v_def_name, v_instance.module_key);
+
+    v_rows := v_rows || jsonb_build_array(jsonb_build_object(
+      'instance_id',    v_instance.id,
+      'module_key',     v_instance.module_key,
+      'record_id',      v_instance.record_id,
+      'status',         v_instance.status,
+      'initiated_by',   v_instance.initiated_by,
+      'requester_name', v_requester_name,
+      'initiated_at',   to_char(v_instance.initiated_at, 'YYYY-MM-DD"T"HH24:MI:SS'),
+      'workflow_name',  v_def_name,
+      'step_title',     'Step ' || COALESCE(v_step_ord::text, ''),
+      'step_order',     v_step_ord,
+      'total_steps',    COALESCE(v_total, 1),
+      'is_final',       v_step_ord IS NULL OR v_step_ord >= COALESCE(v_total, 1)
+    ));
+  END LOOP;
+
+  RETURN v_rows;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.pending_approvals() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pending_approvals() TO authenticated;
+
+-- ============================================================
+-- 2. Context for a specific module record's pending workflow
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.get_workflow_step_context(
+  p_module_key text,
+  p_record_id uuid
+)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT jsonb_build_object(
+    'instance_id', wi.id,
+    'step_order',  ws.sort_order,
+    'total_steps', COALESCE(t.total, 1),
+    'is_final',    ws.sort_order IS NULL OR ws.sort_order >= COALESCE(t.total, 1)
+  )
+  FROM workflow_instances wi
+  LEFT JOIN workflow_steps ws ON ws.id = wi.current_step_id
+  LEFT JOIN LATERAL (
+    SELECT count(*) AS total
+      FROM workflow_steps ws2
+     WHERE ws2.workflow_definition_id = wi.workflow_definition_id
+  ) t ON true
+  WHERE wi.module_key = p_module_key
+    AND wi.record_id = p_record_id
+    AND wi.status = 'PENDING'
+  ORDER BY wi.created_at DESC
+  LIMIT 1;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.get_workflow_step_context(text, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_workflow_step_context(text, uuid) TO authenticated;
+
+-- ===========================================================================
+-- 20261017000004_employee_query_threads.sql
+-- ===========================================================================
+
+-- Employee query threads (chat), reply deadlines and notifications.
+--
+-- Employees can no longer raise queries themselves: HR creates a query against
+-- an employee (optionally with a reply deadline) and the conversation happens
+-- as a message thread. Notifications:
+--   * employee is notified when HR opens a query
+--   * employee is reminded as the reply deadline approaches
+--   * HR (the query creator) is notified when the employee replies
+
+-- ============================================================
+-- 1. Query deadline / threading columns
+-- ============================================================
+ALTER TABLE employee_queries
+  ADD COLUMN IF NOT EXISTS reply_deadline timestamptz,
+  ADD COLUMN IF NOT EXISTS deadline_notified_at timestamptz,
+  ADD COLUMN IF NOT EXISTS last_message_at timestamptz,
+  ADD COLUMN IF NOT EXISTS last_message_by text;
+
+-- ============================================================
+-- 2. Message thread
+-- ============================================================
+CREATE TABLE IF NOT EXISTS employee_query_messages (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  query_id uuid NOT NULL REFERENCES employee_queries(id) ON DELETE CASCADE,
+  author_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  author_type text NOT NULL DEFAULT 'HR' CHECK (author_type IN ('EMPLOYEE', 'HR')),
+  body text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_query_messages_query
+  ON employee_query_messages (query_id, created_at);
+
+ALTER TABLE employee_query_messages ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "select_query_messages" ON employee_query_messages;
+DROP POLICY IF EXISTS "insert_query_messages" ON employee_query_messages;
+DROP POLICY IF EXISTS "update_query_messages" ON employee_query_messages;
+DROP POLICY IF EXISTS "delete_query_messages" ON employee_query_messages;
+
+CREATE POLICY "select_query_messages" ON employee_query_messages FOR SELECT TO authenticated
+  USING (EXISTS (
+    SELECT 1 FROM employee_queries q
+     WHERE q.id = query_id
+       AND (q.employee_id = public.current_employee_id()
+            OR public.has_any_privilege(ARRAY['employees.view_all', 'employees.manage', 'admin.settings']))
+  ));
+
+-- The owning employee may reply; HR (manage/admin) may post too.
+CREATE POLICY "insert_query_messages" ON employee_query_messages FOR INSERT TO authenticated
+  WITH CHECK (EXISTS (
+    SELECT 1 FROM employee_queries q
+     WHERE q.id = query_id
+       AND (q.employee_id = public.current_employee_id()
+            OR public.has_any_privilege(ARRAY['employees.manage', 'admin.settings']))
+  ));
+
+CREATE POLICY "update_query_messages" ON employee_query_messages FOR UPDATE TO authenticated
+  USING (public.has_any_privilege(ARRAY['employees.manage', 'admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['employees.manage', 'admin.settings']));
+
+CREATE POLICY "delete_query_messages" ON employee_query_messages FOR DELETE TO authenticated
+  USING (public.has_any_privilege(ARRAY['employees.manage', 'admin.settings']));
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+     WHERE pubname = 'supabase_realtime' AND tablename = 'employee_query_messages'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE employee_query_messages;
+  END IF;
+END;
+$$;
+
+-- ============================================================
+-- 3. Author stamping (BEFORE INSERT)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.set_query_message_author()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_query_employee uuid;
+BEGIN
+  NEW.author_id := COALESCE(NEW.author_id, public.current_employee_id());
+  SELECT employee_id INTO v_query_employee FROM employee_queries WHERE id = NEW.query_id;
+  NEW.author_type := CASE
+    WHEN NEW.author_id IS NOT NULL AND NEW.author_id = v_query_employee THEN 'EMPLOYEE'
+    ELSE 'HR'
+  END;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_query_message_author ON employee_query_messages;
+CREATE TRIGGER trg_query_message_author
+BEFORE INSERT ON employee_query_messages
+FOR EACH ROW EXECUTE FUNCTION public.set_query_message_author();
+
+-- ============================================================
+-- 4. Message posted -> update thread state + notify the other side
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.notify_query_message()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_query employee_queries%ROWTYPE;
+  v_recipient uuid;
+  v_recipient_email text;
+  v_recipient_name text;
+  v_preview text;
+  v_link text;
+  v_employee_name text;
+  v_new_status text;
+BEGIN
+  SELECT * INTO v_query FROM employee_queries WHERE id = NEW.query_id;
+  IF NOT FOUND THEN
+    RETURN NEW;
+  END IF;
+
+  v_new_status := CASE WHEN NEW.author_type = 'EMPLOYEE' THEN 'RESPONDED' ELSE 'OPEN' END;
+
+  UPDATE employee_queries
+     SET last_message_at = NEW.created_at,
+         last_message_by = NEW.author_type,
+         deadline_notified_at = NULL,
+         status = CASE WHEN status = 'CLOSED' THEN status ELSE v_new_status END,
+         updated_at = now()
+   WHERE id = NEW.query_id;
+
+  v_preview := left(regexp_replace(COALESCE(NEW.body, ''), '\s+', ' ', 'g'), 140);
+  SELECT trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))
+    INTO v_employee_name
+    FROM employees WHERE id = v_query.employee_id;
+
+  IF NEW.author_type = 'EMPLOYEE' THEN
+    v_recipient := v_query.raised_by;
+    IF v_recipient IS NULL THEN
+      RETURN NEW;
+    END IF;
+    PERFORM public.create_notification(
+      v_recipient,
+      'Query reply received',
+      COALESCE(v_employee_name, 'An employee') || ' replied to "' || v_query.subject || '".',
+      'INFO',
+      '/queries',
+      jsonb_build_object('query_id', v_query.id::text, 'employee_id', v_query.employee_id::text)
+    );
+
+    SELECT email, trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))
+      INTO v_recipient_email, v_recipient_name
+      FROM employees WHERE id = v_recipient;
+  ELSE
+    v_recipient := v_query.employee_id;
+    PERFORM public.create_notification(
+      v_recipient,
+      'New message about your query',
+      'HR replied to "' || v_query.subject || '".',
+      'INFO',
+      '/employees/' || v_query.employee_id::text || '/queries',
+      jsonb_build_object('query_id', v_query.id::text)
+    );
+
+    SELECT email, trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))
+      INTO v_recipient_email, v_recipient_name
+      FROM employees WHERE id = v_recipient;
+  END IF;
+
+  IF v_recipient_email IS NOT NULL AND btrim(v_recipient_email) <> '' THEN
+    INSERT INTO notification_queue (event_key, recipient_email, recipient_name, subject, body_html, status, metadata)
+    VALUES (
+      CASE WHEN NEW.author_type = 'EMPLOYEE' THEN 'query.reply.employee' ELSE 'query.reply.hr' END,
+      v_recipient_email,
+      NULLIF(btrim(v_recipient_name), ''),
+      CASE WHEN NEW.author_type = 'EMPLOYEE'
+        THEN 'New reply on "' || v_query.subject || '"'
+        ELSE 'New message about your query: ' || v_query.subject END,
+      '<p>Hi ' || COALESCE(NULLIF(btrim(v_recipient_name), ''), 'there') || ',</p>' ||
+      '<p>' || COALESCE(v_employee_name, 'An employee') || ' replied:</p>' ||
+      '<blockquote>' || v_preview || '</blockquote>' ||
+      '<p>Open HR Flow to continue the conversation.</p>',
+      'PENDING',
+      jsonb_build_object('query_id', v_query.id::text, 'employee_id', v_query.employee_id::text)
+    );
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_notify_query_message ON employee_query_messages;
+CREATE TRIGGER trg_notify_query_message
+AFTER INSERT ON employee_query_messages
+FOR EACH ROW EXECUTE FUNCTION public.notify_query_message();
+
+-- ============================================================
+-- 5. Query opened by HR -> notify the employee (in-app + email)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.notify_query_created()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_email text;
+  v_name text;
+  v_deadline_text text;
+BEGIN
+  IF NEW.employee_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  v_deadline_text := CASE
+    WHEN NEW.reply_deadline IS NOT NULL
+      THEN ' Please reply by ' || to_char(NEW.reply_deadline, 'Mon DD, YYYY HH24:MI') || '.'
+    ELSE ''
+  END;
+
+  PERFORM public.create_notification(
+    NEW.employee_id,
+    'New query from HR',
+    'A query was raised against your account: "' || NEW.subject || '".' || v_deadline_text,
+    'INFO',
+    '/employees/' || NEW.employee_id::text || '/queries',
+    jsonb_build_object('query_id', NEW.id::text, 'reply_deadline', NEW.reply_deadline)
+  );
+
+  SELECT email, trim(COALESCE(first_name, '') || ' ' || COALESCE(last_name, ''))
+    INTO v_email, v_name
+    FROM employees WHERE id = NEW.employee_id;
+
+  IF v_email IS NOT NULL AND btrim(v_email) <> '' THEN
+    INSERT INTO notification_queue (event_key, recipient_email, recipient_name, subject, body_html, status, metadata)
+    VALUES (
+      'query.created',
+      v_email,
+      NULLIF(btrim(v_name), ''),
+      'New query: ' || NEW.subject,
+      '<p>Hi ' || COALESCE(NULLIF(btrim(v_name), ''), 'there') || ',</p>' ||
+      '<p>HR has raised a query against your account:</p>' ||
+      '<p><strong>' || NEW.subject || '</strong></p>' ||
+      COALESCE('<p>' || NEW.details || '</p>', '') ||
+      CASE WHEN v_deadline_text <> '' THEN '<p>' || v_deadline_text || '</p>' ELSE '' END ||
+      '<p>Please open HR Flow to view and reply.</p>',
+      'PENDING',
+      jsonb_build_object('query_id', NEW.id::text, 'reply_deadline', NEW.reply_deadline)
+    );
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_notify_query_created ON employee_queries;
+CREATE TRIGGER trg_notify_query_created
+AFTER INSERT ON employee_queries
+FOR EACH ROW EXECUTE FUNCTION public.notify_query_created();
+
+-- ============================================================
+-- 6. Deadline reminders (scan; run by pg_cron / on demand)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.notify_query_deadlines()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_rec RECORD;
+  v_count integer := 0;
+BEGIN
+  FOR v_rec IN
+    SELECT q.id, q.employee_id, q.subject, q.reply_deadline, e.email,
+           trim(COALESCE(e.first_name, '') || ' ' || COALESCE(e.last_name, '')) AS emp_name
+      FROM employee_queries q
+      JOIN employees e ON e.id = q.employee_id
+     WHERE q.status <> 'CLOSED'
+       AND q.reply_deadline IS NOT NULL
+       AND q.deadline_notified_at IS NULL
+       AND q.reply_deadline > now()
+       AND q.reply_deadline <= now() + interval '1 day'
+       AND (q.last_message_by IS DISTINCT FROM 'EMPLOYEE')
+  LOOP
+    v_count := v_count + 1;
+
+    PERFORM public.create_notification(
+      v_rec.employee_id,
+      'Query reply deadline approaching',
+      'Your reply to "' || v_rec.subject || '" is due ' || to_char(v_rec.reply_deadline, 'Mon DD, YYYY HH24:MI') || '.',
+      'WARNING',
+      '/employees/' || v_rec.employee_id::text || '/queries',
+      jsonb_build_object('query_id', v_rec.id::text, 'reply_deadline', v_rec.reply_deadline)
+    );
+
+    IF v_rec.email IS NOT NULL AND btrim(v_rec.email) <> '' THEN
+      INSERT INTO notification_queue (event_key, recipient_email, recipient_name, subject, body_html, status, metadata)
+      VALUES (
+        'query.deadline',
+        v_rec.email,
+        NULLIF(btrim(v_rec.emp_name), ''),
+        'Reply deadline approaching: ' || v_rec.subject,
+        '<p>Hi ' || COALESCE(NULLIF(btrim(v_rec.emp_name), ''), 'there') || ',</p>' ||
+        '<p>Your reply to the query <strong>' || v_rec.subject || '</strong> is due on <strong>' ||
+        to_char(v_rec.reply_deadline, 'Mon DD, YYYY HH24:MI') || '</strong>.</p>' ||
+        '<p>Please open HR Flow to respond.</p>',
+        'PENDING',
+        jsonb_build_object('query_id', v_rec.id::text, 'reply_deadline', v_rec.reply_deadline)
+      );
+    END IF;
+
+    UPDATE employee_queries SET deadline_notified_at = now() WHERE id = v_rec.id;
+  END LOOP;
+
+  RETURN v_count;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.notify_query_deadlines() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.notify_query_deadlines() TO authenticated;
+
+-- Schedule the deadline sweep (best effort; never fails the migration).
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    BEGIN
+      DELETE FROM cron.job WHERE jobname = 'notify-query-deadlines';
+      PERFORM cron.schedule(
+        'notify-query-deadlines',
+        '*/15 * * * *',
+        $cron$ SELECT public.notify_query_deadlines(); $cron$
+      );
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'notify-query-deadlines job not scheduled: %', SQLERRM;
+    END;
+  END IF;
+END $$;
+
+-- ===========================================================================
+-- 20261017000005_self_service_emergency_contacts.sql
+-- ===========================================================================
+
+-- Self-service emergency contacts so employees can supply them during onboarding
+-- without needing the employees.manage privilege.
+
+CREATE OR REPLACE FUNCTION public.upsert_my_emergency_contact(
+  p_name text,
+  p_relationship text DEFAULT NULL,
+  p_phone text DEFAULT NULL,
+  p_email text DEFAULT NULL,
+  p_is_primary boolean DEFAULT false
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'public'
+AS $function$
+DECLARE
+  v_emp uuid := public.current_employee_id();
+  v_id uuid;
+  v_primary boolean;
+BEGIN
+  IF v_emp IS NULL THEN
+    RAISE EXCEPTION 'You must be signed in to add an emergency contact';
+  END IF;
+  IF p_name IS NULL OR btrim(p_name) = '' THEN
+    RAISE EXCEPTION 'Contact name is required';
+  END IF;
+
+  v_primary := COALESCE(p_is_primary, false)
+    OR NOT EXISTS (SELECT 1 FROM public.employee_emergency_contacts WHERE employee_id = v_emp);
+
+  IF v_primary THEN
+    UPDATE public.employee_emergency_contacts
+       SET is_primary = false
+     WHERE employee_id = v_emp AND is_primary;
+  END IF;
+
+  INSERT INTO public.employee_emergency_contacts (
+    employee_id, name, relationship, phone, email, is_primary
+  ) VALUES (
+    v_emp,
+    btrim(p_name),
+    NULLIF(btrim(COALESCE(p_relationship, '')), ''),
+    NULLIF(btrim(COALESCE(p_phone, '')), ''),
+    NULLIF(btrim(COALESCE(p_email, '')), ''),
+    v_primary
+  )
+  RETURNING id INTO v_id;
+
+  IF v_primary THEN
+    UPDATE public.employees
+       SET emergency_contact_name = btrim(p_name),
+           emergency_contact_phone = NULLIF(btrim(COALESCE(p_phone, '')), '')
+     WHERE id = v_emp;
+  END IF;
+
+  RETURN v_id;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION public.upsert_my_emergency_contact(text, text, text, text, boolean) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.upsert_my_emergency_contact(text, text, text, text, boolean) FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION public.delete_my_emergency_contact(p_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path TO 'public'
+AS $function$
+DECLARE
+  v_emp uuid := public.current_employee_id();
+  v_was_primary boolean;
+BEGIN
+  IF v_emp IS NULL THEN
+    RAISE EXCEPTION 'You must be signed in to remove an emergency contact';
+  END IF;
+
+  SELECT is_primary INTO v_was_primary
+    FROM public.employee_emergency_contacts
+   WHERE id = p_id AND employee_id = v_emp;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Emergency contact not found';
+  END IF;
+
+  DELETE FROM public.employee_emergency_contacts
+   WHERE id = p_id AND employee_id = v_emp;
+
+  IF v_was_primary THEN
+    UPDATE public.employees
+       SET emergency_contact_name = NULL,
+           emergency_contact_phone = NULL
+     WHERE id = v_emp;
+  END IF;
+END;
+$function$;
+
+GRANT EXECUTE ON FUNCTION public.delete_my_emergency_contact(uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.delete_my_emergency_contact(uuid) FROM PUBLIC;
+
+-- ===========================================================================
+-- 20261017000006_inventory_module.sql
+-- ===========================================================================
+
+/*
+# Inventory Module — multi-warehouse stock management
+
+Adds a full inventory subsystem that sits alongside the rest of the ERP:
+
+1. `inventory_warehouses`  — physical/virtual stock locations (multiple per company).
+2. `inventory_categories`  — structured grouping for stockable items.
+3. `inventory_items`       — the inventory/SKU catalogue (optionally linked to a
+                             procurement master `items` row).
+4. `inventory_stock`       — on-hand quantity per (item, warehouse).
+5. `inventory_movements`   — immutable ledger of every stock movement
+                             (receipts, issues, transfers, adjustments, returns).
+
+A single SECURITY DEFINER RPC, `record_inventory_movement(...)`, atomically
+writes the ledger row and updates on-hand quantities so stock can never drift.
+
+New privileges: `inventory.view`, `inventory.manage`, `inventory.move`,
+`inventory.settings`.
+*/
+
+-- ============================================================
+-- 1. Privilege catalog entries
+-- ============================================================
+INSERT INTO privilege_definitions (key, category, label, description, sort_order) VALUES
+  ('inventory.view',     'Inventory', 'View inventory',           'Read warehouses, items, stock levels and movement history', 200),
+  ('inventory.manage',   'Inventory', 'Manage inventory',         'Create and edit inventory items and stock records', 202),
+  ('inventory.move',     'Inventory', 'Record stock movements',   'Record receipts, issues, transfers and adjustments', 204),
+  ('inventory.settings', 'Inventory', 'Manage warehouses & setup','Create warehouses and organise inventory categories', 206)
+ON CONFLICT (key) DO NOTHING;
+
+-- ============================================================
+-- 2. Warehouses
+-- ============================================================
+CREATE TABLE IF NOT EXISTS inventory_warehouses (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  code text NOT NULL,
+  name text NOT NULL,
+  type text NOT NULL DEFAULT 'MAIN',            -- MAIN, BRANCH, TRANSIT, QUARANTINE, VIRTUAL
+  address text,
+  city text,
+  state text,
+  country text,
+  phone text,
+  manager_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  is_active boolean NOT NULL DEFAULT true,
+  is_default boolean NOT NULL DEFAULT false,
+  notes text,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_warehouses_code ON inventory_warehouses (upper(code));
+CREATE INDEX IF NOT EXISTS idx_inventory_warehouses_active ON inventory_warehouses (is_active);
+
+ALTER TABLE inventory_warehouses ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 3. Categories
+-- ============================================================
+CREATE TABLE IF NOT EXISTS inventory_categories (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  code text,
+  name text NOT NULL,
+  description text,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_categories_name ON inventory_categories (lower(name));
+CREATE INDEX IF NOT EXISTS idx_inventory_categories_active ON inventory_categories (is_active);
+
+ALTER TABLE inventory_categories ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 4. Items (inventory catalogue)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS inventory_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  item_id uuid REFERENCES items(id) ON DELETE SET NULL,   -- optional link to procurement master
+  category_id uuid REFERENCES inventory_categories(id) ON DELETE SET NULL,
+  name text NOT NULL,
+  sku text,
+  barcode text,
+  uom text NOT NULL DEFAULT 'EA',
+  unit_cost numeric(14,2) NOT NULL DEFAULT 0,
+  reorder_level numeric(14,2) NOT NULL DEFAULT 0,
+  reorder_quantity numeric(14,2) NOT NULL DEFAULT 0,
+  is_tracked boolean NOT NULL DEFAULT false,             -- batch / serial tracked
+  is_active boolean NOT NULL DEFAULT true,
+  description text,
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_items_sku ON inventory_items (upper(sku)) WHERE sku IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_items_item ON inventory_items (item_id) WHERE item_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_inventory_items_category ON inventory_items (category_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_items_active ON inventory_items (is_active);
+
+ALTER TABLE inventory_items ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 5. Stock (on hand per item + warehouse)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS inventory_stock (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  item_id uuid NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+  warehouse_id uuid NOT NULL REFERENCES inventory_warehouses(id) ON DELETE CASCADE,
+  quantity numeric(14,2) NOT NULL DEFAULT 0,
+  reserved_quantity numeric(14,2) NOT NULL DEFAULT 0,
+  bin_location text,
+  reorder_level numeric(14,2),
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now(),
+  UNIQUE (item_id, warehouse_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_stock_item ON inventory_stock (item_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_stock_warehouse ON inventory_stock (warehouse_id);
+
+ALTER TABLE inventory_stock ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 6. Movements (immutable ledger)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS inventory_movements (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  movement_type text NOT NULL,                 -- RECEIPT, ISSUE, ADJUSTMENT, TRANSFER, RETURN, OPENING
+  item_id uuid NOT NULL REFERENCES inventory_items(id) ON DELETE RESTRICT,
+  warehouse_id uuid NOT NULL REFERENCES inventory_warehouses(id) ON DELETE RESTRICT,
+  dest_warehouse_id uuid REFERENCES inventory_warehouses(id) ON DELETE SET NULL,
+  quantity numeric(14,2) NOT NULL DEFAULT 0,   -- signed effect on the source warehouse
+  resulting_quantity numeric(14,2),
+  unit_cost numeric(14,2),
+  total_cost numeric(16,2),
+  reference text,
+  notes text,
+  batch_no text,
+  expiry_date date,
+  movement_date date NOT NULL DEFAULT CURRENT_DATE,
+  performed_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_movements_item ON inventory_movements (item_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_movements_warehouse ON inventory_movements (warehouse_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_movements_type ON inventory_movements (movement_type);
+CREATE INDEX IF NOT EXISTS idx_inventory_movements_date ON inventory_movements (movement_date);
+
+ALTER TABLE inventory_movements ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 7. updated_at triggers
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.touch_inventory_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_touch_inventory_warehouses ON inventory_warehouses;
+CREATE TRIGGER trg_touch_inventory_warehouses
+BEFORE UPDATE ON inventory_warehouses
+FOR EACH ROW EXECUTE FUNCTION public.touch_inventory_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_inventory_categories ON inventory_categories;
+CREATE TRIGGER trg_touch_inventory_categories
+BEFORE UPDATE ON inventory_categories
+FOR EACH ROW EXECUTE FUNCTION public.touch_inventory_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_inventory_items ON inventory_items;
+CREATE TRIGGER trg_touch_inventory_items
+BEFORE UPDATE ON inventory_items
+FOR EACH ROW EXECUTE FUNCTION public.touch_inventory_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_inventory_stock ON inventory_stock;
+CREATE TRIGGER trg_touch_inventory_stock
+BEFORE UPDATE ON inventory_stock
+FOR EACH ROW EXECUTE FUNCTION public.touch_inventory_updated_at();
+
+-- ============================================================
+-- 8. Row level security
+-- ============================================================
+-- Read access: any inventory privilege (or admin).
+-- Warehouses / categories writes: inventory.settings / inventory.manage / admin.
+-- Items writes: inventory.manage / admin.
+-- Movements writes: through the RPC (grants handled below); direct writes limited.
+
+DROP POLICY IF EXISTS "select_inventory_warehouses" ON inventory_warehouses;
+DROP POLICY IF EXISTS "insert_inventory_warehouses" ON inventory_warehouses;
+DROP POLICY IF EXISTS "update_inventory_warehouses" ON inventory_warehouses;
+DROP POLICY IF EXISTS "delete_inventory_warehouses" ON inventory_warehouses;
+CREATE POLICY "select_inventory_warehouses" ON inventory_warehouses FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.view','inventory.manage','inventory.move','inventory.settings','admin.settings']));
+CREATE POLICY "insert_inventory_warehouses" ON inventory_warehouses FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_privilege(ARRAY['inventory.manage','inventory.settings','admin.settings']));
+CREATE POLICY "update_inventory_warehouses" ON inventory_warehouses FOR UPDATE TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.manage','inventory.settings','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['inventory.manage','inventory.settings','admin.settings']));
+CREATE POLICY "delete_inventory_warehouses" ON inventory_warehouses FOR DELETE TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.manage','inventory.settings','admin.settings']));
+
+DROP POLICY IF EXISTS "select_inventory_categories" ON inventory_categories;
+DROP POLICY IF EXISTS "insert_inventory_categories" ON inventory_categories;
+DROP POLICY IF EXISTS "update_inventory_categories" ON inventory_categories;
+DROP POLICY IF EXISTS "delete_inventory_categories" ON inventory_categories;
+CREATE POLICY "select_inventory_categories" ON inventory_categories FOR SELECT TO authenticated
+  USING (true);
+CREATE POLICY "insert_inventory_categories" ON inventory_categories FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_privilege(ARRAY['inventory.manage','inventory.settings','admin.settings']));
+CREATE POLICY "update_inventory_categories" ON inventory_categories FOR UPDATE TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.manage','inventory.settings','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['inventory.manage','inventory.settings','admin.settings']));
+CREATE POLICY "delete_inventory_categories" ON inventory_categories FOR DELETE TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.manage','inventory.settings','admin.settings']));
+
+DROP POLICY IF EXISTS "select_inventory_items" ON inventory_items;
+DROP POLICY IF EXISTS "insert_inventory_items" ON inventory_items;
+DROP POLICY IF EXISTS "update_inventory_items" ON inventory_items;
+DROP POLICY IF EXISTS "delete_inventory_items" ON inventory_items;
+CREATE POLICY "select_inventory_items" ON inventory_items FOR SELECT TO authenticated
+  USING (true);
+CREATE POLICY "insert_inventory_items" ON inventory_items FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_privilege(ARRAY['inventory.manage','admin.settings']));
+CREATE POLICY "update_inventory_items" ON inventory_items FOR UPDATE TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.manage','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['inventory.manage','admin.settings']));
+CREATE POLICY "delete_inventory_items" ON inventory_items FOR DELETE TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.manage','admin.settings']));
+
+DROP POLICY IF EXISTS "select_inventory_stock" ON inventory_stock;
+DROP POLICY IF EXISTS "insert_inventory_stock" ON inventory_stock;
+DROP POLICY IF EXISTS "update_inventory_stock" ON inventory_stock;
+DROP POLICY IF EXISTS "delete_inventory_stock" ON inventory_stock;
+CREATE POLICY "select_inventory_stock" ON inventory_stock FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.view','inventory.manage','inventory.move','admin.settings']));
+CREATE POLICY "insert_inventory_stock" ON inventory_stock FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_privilege(ARRAY['inventory.manage','inventory.move','admin.settings']));
+CREATE POLICY "update_inventory_stock" ON inventory_stock FOR UPDATE TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.manage','inventory.move','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['inventory.manage','inventory.move','admin.settings']));
+CREATE POLICY "delete_inventory_stock" ON inventory_stock FOR DELETE TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.manage','admin.settings']));
+
+DROP POLICY IF EXISTS "select_inventory_movements" ON inventory_movements;
+DROP POLICY IF EXISTS "insert_inventory_movements" ON inventory_movements;
+CREATE POLICY "select_inventory_movements" ON inventory_movements FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['inventory.view','inventory.manage','inventory.move','admin.settings']));
+CREATE POLICY "insert_inventory_movements" ON inventory_movements FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_privilege(ARRAY['inventory.manage','inventory.move','admin.settings']));
+
+-- ============================================================
+-- 9. Movement RPC — atomic ledger + stock update
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.record_inventory_movement(
+  p_type text,
+  p_item_id uuid,
+  p_warehouse_id uuid,
+  p_dest_warehouse_id uuid DEFAULT NULL,
+  p_quantity numeric DEFAULT 0,
+  p_unit_cost numeric DEFAULT NULL,
+  p_reference text DEFAULT NULL,
+  p_notes text DEFAULT NULL,
+  p_batch_no text DEFAULT NULL,
+  p_expiry_date date DEFAULT NULL,
+  p_movement_date date DEFAULT CURRENT_DATE
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_type text := upper(trim(p_type));
+  v_actor uuid := public.current_employee_id();
+  v_current numeric := 0;
+  v_new numeric := 0;
+  v_delta numeric := 0;
+  v_qty numeric := COALESCE(p_quantity, 0);
+  v_cost numeric := COALESCE(p_unit_cost, 0);
+  v_movement_id uuid;
+  v_total numeric;
+BEGIN
+  IF NOT public.has_any_privilege(ARRAY['inventory.manage','inventory.move','admin.settings']) THEN
+    RAISE EXCEPTION 'You do not have permission to record inventory movements';
+  END IF;
+
+  IF v_type NOT IN ('RECEIPT','ISSUE','ADJUSTMENT','TRANSFER','RETURN','OPENING') THEN
+    RAISE EXCEPTION 'Invalid movement type: %', p_type;
+  END IF;
+
+  IF p_item_id IS NULL OR p_warehouse_id IS NULL THEN
+    RAISE EXCEPTION 'Item and warehouse are required';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM inventory_items WHERE id = p_item_id) THEN
+    RAISE EXCEPTION 'Inventory item not found';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM inventory_warehouses WHERE id = p_warehouse_id) THEN
+    RAISE EXCEPTION 'Warehouse not found';
+  END IF;
+
+  IF v_type = 'TRANSFER' THEN
+    IF p_dest_warehouse_id IS NULL OR p_dest_warehouse_id = p_warehouse_id THEN
+      RAISE EXCEPTION 'A different destination warehouse is required for transfers';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM inventory_warehouses WHERE id = p_dest_warehouse_id) THEN
+      RAISE EXCEPTION 'Destination warehouse not found';
+    END IF;
+  END IF;
+
+  IF v_qty < 0 THEN
+    RAISE EXCEPTION 'Quantity cannot be negative';
+  END IF;
+
+  SELECT COALESCE(quantity, 0) INTO v_current
+    FROM inventory_stock
+   WHERE item_id = p_item_id AND warehouse_id = p_warehouse_id;
+  v_current := COALESCE(v_current, 0);
+
+  IF v_type IN ('RECEIPT', 'OPENING', 'RETURN') THEN
+    v_delta := v_qty;
+  ELSIF v_type = 'ISSUE' THEN
+    v_delta := -v_qty;
+  ELSIF v_type = 'TRANSFER' THEN
+    v_delta := -v_qty;
+  ELSIF v_type = 'ADJUSTMENT' THEN
+    v_delta := v_qty - v_current;   -- p_quantity is the new counted quantity
+  END IF;
+
+  v_new := v_current + v_delta;
+
+  IF v_new < 0 THEN
+    RAISE EXCEPTION 'Insufficient stock: % on hand, % requested', v_current, v_qty;
+  END IF;
+
+  v_total := CASE WHEN v_type IN ('RECEIPT', 'OPENING', 'RETURN') THEN v_qty * v_cost ELSE NULL END;
+
+  INSERT INTO inventory_movements (
+    movement_type, item_id, warehouse_id, dest_warehouse_id, quantity,
+    resulting_quantity, unit_cost, total_cost, reference, notes,
+    batch_no, expiry_date, movement_date, performed_by
+  ) VALUES (
+    v_type, p_item_id, p_warehouse_id, p_dest_warehouse_id, v_delta,
+    v_new, v_cost, v_total, p_reference, p_notes,
+    p_batch_no, p_expiry_date, COALESCE(p_movement_date, CURRENT_DATE), v_actor
+  ) RETURNING id INTO v_movement_id;
+
+  INSERT INTO inventory_stock (item_id, warehouse_id, quantity, updated_at)
+  VALUES (p_item_id, p_warehouse_id, v_new, now())
+  ON CONFLICT (item_id, warehouse_id)
+  DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now();
+
+  IF v_type = 'TRANSFER' THEN
+    INSERT INTO inventory_stock (item_id, warehouse_id, quantity, updated_at)
+    VALUES (p_item_id, p_dest_warehouse_id, v_qty, now())
+    ON CONFLICT (item_id, warehouse_id)
+    DO UPDATE SET quantity = inventory_stock.quantity + EXCLUDED.quantity, updated_at = now();
+  END IF;
+
+  RETURN v_movement_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.record_inventory_movement(text, uuid, uuid, uuid, numeric, numeric, text, text, text, date, date) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.record_inventory_movement(text, uuid, uuid, uuid, numeric, numeric, text, text, text, date, date) FROM PUBLIC;
+
+-- ============================================================
+-- 10. Seed starter data (idempotent)
+-- ============================================================
+INSERT INTO inventory_warehouses (code, name, type, city, state, country, is_active, is_default)
+VALUES ('MAIN', 'Main Warehouse', 'MAIN', NULL, NULL, NULL, true, true)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO inventory_categories (code, name, description) VALUES
+  ('GEN', 'General', 'General purpose stock items'),
+  ('ICT', 'ICT', 'Computers, peripherals and ICT consumables'),
+  ('STA', 'Stationery', 'Office stationery and paper'),
+  ('FUR', 'Furniture', 'Office furniture and fittings'),
+  ('CON', 'Consumables', 'Day-to-day consumable supplies')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO inventory_items (category_id, name, sku, uom, unit_cost, reorder_level, reorder_quantity)
+SELECT c.id, v.name, v.sku, v.uom, v.unit_cost, v.reorder_level, v.reorder_quantity
+FROM (VALUES
+  ('Stationery', 'A4 Paper Ream',   'STA-0001', 'REAM', 4.50, 20, 50),
+  ('ICT',        'Toner Cartridge',  'ICT-0001', 'EA',   65.00, 5, 15),
+  ('General',    'Ballpoint Pen (Blue)', 'STA-0002', 'EA', 0.60, 50, 200),
+  ('Furniture',  'Office Chair',     'FUR-0001', 'EA',   120.00, 2, 5)
+) AS v(category, name, sku, uom, unit_cost, reorder_level, reorder_quantity)
+JOIN inventory_categories c ON c.name = v.category
+ON CONFLICT DO NOTHING;
+
+-- ===========================================================================
+-- 20261017000007_inventory_catalog_and_receipts.sql
+-- ===========================================================================
+
+/*
+# Unify the item catalogue + post goods receipts into inventory
+
+Turns `inventory_items` into the single master item catalogue and wires
+procurement goods receipts into the stock ledger.
+
+1. Merge the legacy `items` master into `inventory_items` (preserving the legacy
+   id in `inventory_items.item_id`) so nothing is lost and procurement dropdowns
+   can source from inventory.
+2. Add `warehouse_id` / `inventory_posted` to `procurement_receipts`.
+3. Allow `procurement.receive` holders to record inventory movements (a goods
+   receiver should be able to post a receipt).
+4. Add `post_receipt_to_inventory(receipt_id, warehouse_id)` which maps each
+   accepted receipt line to an inventory item (by legacy link, then by name, or
+   creates one) and records an inventory RECEIPT movement — atomically and
+   idempotently.
+*/
+
+-- ============================================================
+-- 1. Merge legacy `items` into `inventory_items`
+-- ============================================================
+-- Link existing inventory rows to their legacy master by name.
+UPDATE inventory_items ii
+   SET item_id = i.id
+  FROM items i
+ WHERE lower(ii.name) = lower(i.name)
+   AND ii.item_id IS NULL;
+
+-- Bring across legacy items that have no inventory counterpart yet.
+INSERT INTO inventory_items (item_id, name, sku, uom, unit_cost, description, is_active)
+SELECT i.id,
+       i.name,
+       CASE
+         WHEN i.sku IS NOT NULL
+          AND EXISTS (SELECT 1 FROM inventory_items x WHERE upper(x.sku) = upper(i.sku))
+         THEN NULL
+         ELSE i.sku
+       END,
+       COALESCE(NULLIF(i.uom, ''), 'EA'),
+       COALESCE(i.unit_price, 0),
+       i.description,
+       COALESCE(i.is_active, true)
+  FROM items i
+ WHERE NOT EXISTS (SELECT 1 FROM inventory_items ii WHERE ii.item_id = i.id)
+   AND NOT EXISTS (SELECT 1 FROM inventory_items ii WHERE lower(ii.name) = lower(i.name));
+
+-- ============================================================
+-- 2. Receipt linkage columns
+-- ============================================================
+ALTER TABLE procurement_receipts
+  ADD COLUMN IF NOT EXISTS warehouse_id uuid REFERENCES inventory_warehouses(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS inventory_posted boolean NOT NULL DEFAULT false;
+
+CREATE INDEX IF NOT EXISTS idx_receipts_warehouse ON procurement_receipts (warehouse_id);
+
+-- ============================================================
+-- 3. record_inventory_movement: also allow procurement.receive
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.record_inventory_movement(
+  p_type text,
+  p_item_id uuid,
+  p_warehouse_id uuid,
+  p_dest_warehouse_id uuid DEFAULT NULL,
+  p_quantity numeric DEFAULT 0,
+  p_unit_cost numeric DEFAULT NULL,
+  p_reference text DEFAULT NULL,
+  p_notes text DEFAULT NULL,
+  p_batch_no text DEFAULT NULL,
+  p_expiry_date date DEFAULT NULL,
+  p_movement_date date DEFAULT CURRENT_DATE
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_type text := upper(trim(p_type));
+  v_actor uuid := public.current_employee_id();
+  v_current numeric := 0;
+  v_new numeric := 0;
+  v_delta numeric := 0;
+  v_qty numeric := COALESCE(p_quantity, 0);
+  v_cost numeric := COALESCE(p_unit_cost, 0);
+  v_movement_id uuid;
+  v_total numeric;
+BEGIN
+  IF NOT public.has_any_privilege(ARRAY['inventory.manage','inventory.move','procurement.receive','admin.settings']) THEN
+    RAISE EXCEPTION 'You do not have permission to record inventory movements';
+  END IF;
+
+  IF v_type NOT IN ('RECEIPT','ISSUE','ADJUSTMENT','TRANSFER','RETURN','OPENING') THEN
+    RAISE EXCEPTION 'Invalid movement type: %', p_type;
+  END IF;
+
+  IF p_item_id IS NULL OR p_warehouse_id IS NULL THEN
+    RAISE EXCEPTION 'Item and warehouse are required';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM inventory_items WHERE id = p_item_id) THEN
+    RAISE EXCEPTION 'Inventory item not found';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM inventory_warehouses WHERE id = p_warehouse_id) THEN
+    RAISE EXCEPTION 'Warehouse not found';
+  END IF;
+
+  IF v_type = 'TRANSFER' THEN
+    IF p_dest_warehouse_id IS NULL OR p_dest_warehouse_id = p_warehouse_id THEN
+      RAISE EXCEPTION 'A different destination warehouse is required for transfers';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM inventory_warehouses WHERE id = p_dest_warehouse_id) THEN
+      RAISE EXCEPTION 'Destination warehouse not found';
+    END IF;
+  END IF;
+
+  IF v_qty < 0 THEN
+    RAISE EXCEPTION 'Quantity cannot be negative';
+  END IF;
+
+  SELECT COALESCE(quantity, 0) INTO v_current
+    FROM inventory_stock
+   WHERE item_id = p_item_id AND warehouse_id = p_warehouse_id;
+  v_current := COALESCE(v_current, 0);
+
+  IF v_type IN ('RECEIPT', 'OPENING', 'RETURN') THEN
+    v_delta := v_qty;
+  ELSIF v_type = 'ISSUE' THEN
+    v_delta := -v_qty;
+  ELSIF v_type = 'TRANSFER' THEN
+    v_delta := -v_qty;
+  ELSIF v_type = 'ADJUSTMENT' THEN
+    v_delta := v_qty - v_current;   -- p_quantity is the new counted quantity
+  END IF;
+
+  v_new := v_current + v_delta;
+
+  IF v_new < 0 THEN
+    RAISE EXCEPTION 'Insufficient stock: % on hand, % requested', v_current, v_qty;
+  END IF;
+
+  v_total := CASE WHEN v_type IN ('RECEIPT', 'OPENING', 'RETURN') THEN v_qty * v_cost ELSE NULL END;
+
+  INSERT INTO inventory_movements (
+    movement_type, item_id, warehouse_id, dest_warehouse_id, quantity,
+    resulting_quantity, unit_cost, total_cost, reference, notes,
+    batch_no, expiry_date, movement_date, performed_by
+  ) VALUES (
+    v_type, p_item_id, p_warehouse_id, p_dest_warehouse_id, v_delta,
+    v_new, v_cost, v_total, p_reference, p_notes,
+    p_batch_no, p_expiry_date, COALESCE(p_movement_date, CURRENT_DATE), v_actor
+  ) RETURNING id INTO v_movement_id;
+
+  INSERT INTO inventory_stock (item_id, warehouse_id, quantity, updated_at)
+  VALUES (p_item_id, p_warehouse_id, v_new, now())
+  ON CONFLICT (item_id, warehouse_id)
+  DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now();
+
+  IF v_type = 'TRANSFER' THEN
+    INSERT INTO inventory_stock (item_id, warehouse_id, quantity, updated_at)
+    VALUES (p_item_id, p_dest_warehouse_id, v_qty, now())
+    ON CONFLICT (item_id, warehouse_id)
+    DO UPDATE SET quantity = inventory_stock.quantity + EXCLUDED.quantity, updated_at = now();
+  END IF;
+
+  RETURN v_movement_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.record_inventory_movement(text, uuid, uuid, uuid, numeric, numeric, text, text, text, date, date) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.record_inventory_movement(text, uuid, uuid, uuid, numeric, numeric, text, text, text, date, date) FROM PUBLIC;
+
+-- ============================================================
+-- 4. Post a goods receipt into inventory
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.post_receipt_to_inventory(
+  p_receipt_id uuid,
+  p_warehouse_id uuid DEFAULT NULL
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_receipt procurement_receipts%ROWTYPE;
+  v_wh uuid;
+  v_count integer := 0;
+  r RECORD;
+  v_item uuid;
+  v_uom text;
+  v_cost numeric;
+BEGIN
+  IF NOT public.has_any_privilege(ARRAY['inventory.move','inventory.manage','procurement.receive','admin.settings']) THEN
+    RAISE EXCEPTION 'You do not have permission to post goods receipts to inventory';
+  END IF;
+
+  SELECT * INTO v_receipt FROM procurement_receipts WHERE id = p_receipt_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Goods receipt not found';
+  END IF;
+  IF v_receipt.inventory_posted THEN
+    RETURN 0;
+  END IF;
+
+  v_wh := COALESCE(
+    p_warehouse_id,
+    v_receipt.warehouse_id,
+    (SELECT id FROM inventory_warehouses WHERE is_default AND is_active ORDER BY created_at LIMIT 1),
+    (SELECT id FROM inventory_warehouses WHERE is_active ORDER BY created_at LIMIT 1)
+  );
+  IF v_wh IS NULL THEN
+    RAISE EXCEPTION 'No active warehouse is available to post this receipt into';
+  END IF;
+
+  FOR r IN
+    SELECT ri.item_name,
+           ri.quantity_accepted,
+           poi.item_id AS legacy_item_id,
+           poi.uom,
+           poi.unit_price
+      FROM procurement_receipt_items ri
+      LEFT JOIN purchase_order_items poi ON poi.id = ri.po_item_id
+     WHERE ri.receipt_id = p_receipt_id
+       AND COALESCE(ri.quantity_accepted, 0) > 0
+  LOOP
+    v_uom := COALESCE(NULLIF(r.uom, ''), 'EA');
+    v_cost := COALESCE(r.unit_price, 0);
+    v_item := NULL;
+
+    IF r.legacy_item_id IS NOT NULL THEN
+      SELECT id INTO v_item FROM inventory_items WHERE item_id = r.legacy_item_id LIMIT 1;
+    END IF;
+    IF v_item IS NULL AND r.item_name IS NOT NULL THEN
+      SELECT id INTO v_item FROM inventory_items WHERE lower(name) = lower(r.item_name) LIMIT 1;
+    END IF;
+    IF v_item IS NULL THEN
+      INSERT INTO inventory_items (name, uom, unit_cost, item_id)
+      VALUES (COALESCE(r.item_name, 'Unnamed item'), v_uom, v_cost, r.legacy_item_id)
+      RETURNING id INTO v_item;
+    END IF;
+
+    PERFORM public.record_inventory_movement(
+      'RECEIPT', v_item, v_wh, NULL, r.quantity_accepted, v_cost,
+      v_receipt.receipt_number,
+      'Auto-posted from goods receipt ' || v_receipt.receipt_number,
+      NULL, NULL, v_receipt.received_date
+    );
+    v_count := v_count + 1;
+  END LOOP;
+
+  UPDATE procurement_receipts
+     SET inventory_posted = true,
+         warehouse_id = v_wh
+   WHERE id = p_receipt_id;
+
+  RETURN v_count;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.post_receipt_to_inventory(uuid, uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.post_receipt_to_inventory(uuid, uuid) FROM PUBLIC;
+
+-- ===========================================================================
+-- 20261017000008_inventory_media_requests_expiry.sql
+-- ===========================================================================
+
+/*
+# Inventory enhancements: item media + barcode, rack/balance/history/expiry,
+# low & over-stock thresholds, and warehouse Material Requests.
+
+1. `inventory_items` gains `image_url`, `max_stock_level` (over-stock warning),
+   `expiry_warning_days`; `barcode` is auto-generated when blank.
+2. `inventory_stock` gains `expiry_date` (soonest batch expiry) so the system can
+   warn early; `bin_location` doubles as the rack/aisle location.
+3. `record_inventory_movement` maintains `expiry_date` on receipts and now lets
+   `inventory.issue` holders deduct stock.
+4. `material_requests` + `material_request_items` — a multi-line request to release
+   warehouse stock, routed through the generic approval workflow
+   (`inventory.material_request`); `issue_material_request` deducts stock when the
+   warehouse releases it.
+5. Inventory privileges `inventory.request` / `inventory.issue` and a public
+   `inventory-items` storage bucket for product pictures.
+*/
+
+-- ============================================================
+-- 1. Item media, thresholds & barcode
+-- ============================================================
+ALTER TABLE inventory_items
+  ADD COLUMN IF NOT EXISTS image_url text,
+  ADD COLUMN IF NOT EXISTS max_stock_level numeric(14,2),
+  ADD COLUMN IF NOT EXISTS expiry_warning_days integer NOT NULL DEFAULT 30;
+
+CREATE SEQUENCE IF NOT EXISTS inventory_barcode_seq START 1;
+
+CREATE OR REPLACE FUNCTION public.generate_inventory_barcode()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  IF NEW.barcode IS NULL OR btrim(NEW.barcode) = '' THEN
+    NEW.barcode := 'INV' || lpad(nextval('inventory_barcode_seq')::text, 8, '0');
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_generate_inventory_barcode ON inventory_items;
+CREATE TRIGGER trg_generate_inventory_barcode
+BEFORE INSERT ON inventory_items
+FOR EACH ROW EXECUTE FUNCTION public.generate_inventory_barcode();
+
+-- Backfill existing items that have no barcode.
+UPDATE inventory_items
+   SET barcode = 'INV' || lpad(nextval('inventory_barcode_seq')::text, 8, '0')
+ WHERE barcode IS NULL OR btrim(barcode) = '';
+
+-- ============================================================
+-- 2. Stock-level expiry tracking
+-- ============================================================
+ALTER TABLE inventory_stock
+  ADD COLUMN IF NOT EXISTS expiry_date date;
+
+CREATE INDEX IF NOT EXISTS idx_inventory_stock_expiry
+  ON inventory_stock (expiry_date)
+  WHERE expiry_date IS NOT NULL;
+
+-- ============================================================
+-- 3. record_inventory_movement: track expiry + allow inventory.issue
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.record_inventory_movement(
+  p_type text,
+  p_item_id uuid,
+  p_warehouse_id uuid,
+  p_dest_warehouse_id uuid DEFAULT NULL,
+  p_quantity numeric DEFAULT 0,
+  p_unit_cost numeric DEFAULT NULL,
+  p_reference text DEFAULT NULL,
+  p_notes text DEFAULT NULL,
+  p_batch_no text DEFAULT NULL,
+  p_expiry_date date DEFAULT NULL,
+  p_movement_date date DEFAULT CURRENT_DATE
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_type text := upper(trim(p_type));
+  v_actor uuid := public.current_employee_id();
+  v_current numeric := 0;
+  v_new numeric := 0;
+  v_delta numeric := 0;
+  v_qty numeric := COALESCE(p_quantity, 0);
+  v_cost numeric := COALESCE(p_unit_cost, 0);
+  v_movement_id uuid;
+  v_total numeric;
+  v_exp date;
+BEGIN
+  IF NOT public.has_any_privilege(ARRAY['inventory.manage','inventory.move','inventory.issue','procurement.receive','admin.settings']) THEN
+    RAISE EXCEPTION 'You do not have permission to record inventory movements';
+  END IF;
+
+  IF v_type NOT IN ('RECEIPT','ISSUE','ADJUSTMENT','TRANSFER','RETURN','OPENING') THEN
+    RAISE EXCEPTION 'Invalid movement type: %', p_type;
+  END IF;
+
+  IF p_item_id IS NULL OR p_warehouse_id IS NULL THEN
+    RAISE EXCEPTION 'Item and warehouse are required';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM inventory_items WHERE id = p_item_id) THEN
+    RAISE EXCEPTION 'Inventory item not found';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM inventory_warehouses WHERE id = p_warehouse_id) THEN
+    RAISE EXCEPTION 'Warehouse not found';
+  END IF;
+
+  IF v_type = 'TRANSFER' THEN
+    IF p_dest_warehouse_id IS NULL OR p_dest_warehouse_id = p_warehouse_id THEN
+      RAISE EXCEPTION 'A different destination warehouse is required for transfers';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM inventory_warehouses WHERE id = p_dest_warehouse_id) THEN
+      RAISE EXCEPTION 'Destination warehouse not found';
+    END IF;
+  END IF;
+
+  IF v_qty < 0 THEN
+    RAISE EXCEPTION 'Quantity cannot be negative';
+  END IF;
+
+  SELECT COALESCE(quantity, 0) INTO v_current
+    FROM inventory_stock
+   WHERE item_id = p_item_id AND warehouse_id = p_warehouse_id;
+  v_current := COALESCE(v_current, 0);
+
+  IF v_type IN ('RECEIPT', 'OPENING', 'RETURN') THEN
+    v_delta := v_qty;
+  ELSIF v_type = 'ISSUE' THEN
+    v_delta := -v_qty;
+  ELSIF v_type = 'TRANSFER' THEN
+    v_delta := -v_qty;
+  ELSIF v_type = 'ADJUSTMENT' THEN
+    v_delta := v_qty - v_current;   -- p_quantity is the new counted quantity
+  END IF;
+
+  v_new := v_current + v_delta;
+
+  IF v_new < 0 THEN
+    RAISE EXCEPTION 'Insufficient stock: % on hand, % requested', v_current, v_qty;
+  END IF;
+
+  v_total := CASE WHEN v_type IN ('RECEIPT', 'OPENING', 'RETURN') THEN v_qty * v_cost ELSE NULL END;
+
+  -- Only inbound movements carry an expiry date forward onto the stock balance.
+  v_exp := CASE WHEN v_type IN ('RECEIPT', 'OPENING', 'RETURN') THEN p_expiry_date ELSE NULL END;
+
+  INSERT INTO inventory_movements (
+    movement_type, item_id, warehouse_id, dest_warehouse_id, quantity,
+    resulting_quantity, unit_cost, total_cost, reference, notes,
+    batch_no, expiry_date, movement_date, performed_by
+  ) VALUES (
+    v_type, p_item_id, p_warehouse_id, p_dest_warehouse_id, v_delta,
+    v_new, v_cost, v_total, p_reference, p_notes,
+    p_batch_no, p_expiry_date, COALESCE(p_movement_date, CURRENT_DATE), v_actor
+  ) RETURNING id INTO v_movement_id;
+
+  INSERT INTO inventory_stock (item_id, warehouse_id, quantity, expiry_date, updated_at)
+  VALUES (p_item_id, p_warehouse_id, v_new, v_exp, now())
+  ON CONFLICT (item_id, warehouse_id)
+  DO UPDATE SET
+    quantity = EXCLUDED.quantity,
+    expiry_date = CASE
+      WHEN EXCLUDED.expiry_date IS NULL THEN inventory_stock.expiry_date
+      WHEN inventory_stock.expiry_date IS NULL THEN EXCLUDED.expiry_date
+      ELSE LEAST(inventory_stock.expiry_date, EXCLUDED.expiry_date)
+    END,
+    updated_at = now();
+
+  IF v_type = 'TRANSFER' THEN
+    INSERT INTO inventory_stock (item_id, warehouse_id, quantity, updated_at)
+    VALUES (p_item_id, p_dest_warehouse_id, v_qty, now())
+    ON CONFLICT (item_id, warehouse_id)
+    DO UPDATE SET quantity = inventory_stock.quantity + EXCLUDED.quantity, updated_at = now();
+  END IF;
+
+  RETURN v_movement_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.record_inventory_movement(text, uuid, uuid, uuid, numeric, numeric, text, text, text, date, date) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.record_inventory_movement(text, uuid, uuid, uuid, numeric, numeric, text, text, text, date, date) FROM PUBLIC;
+
+-- ============================================================
+-- 4. Privileges
+-- ============================================================
+INSERT INTO privilege_definitions (key, category, label, description, sort_order) VALUES
+  ('inventory.request', 'Inventory', 'Create material requests', 'Raise material requests to release items from a warehouse', 208),
+  ('inventory.issue',   'Inventory', 'Issue warehouse items',     'Approve and issue material requests, deducting stock', 210)
+ON CONFLICT (key) DO NOTHING;
+
+-- ============================================================
+-- 5. Material requests (multi-line warehouse release + workflow)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS material_requests (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_number text NOT NULL UNIQUE,
+  requested_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  department_id uuid REFERENCES departments(id) ON DELETE SET NULL,
+  warehouse_id uuid REFERENCES inventory_warehouses(id) ON DELETE SET NULL,
+  purpose text,
+  required_date date,
+  priority text NOT NULL DEFAULT 'NORMAL',
+  status text NOT NULL DEFAULT 'PENDING',
+  notes text,
+  workflow_instance_id uuid,
+  issued_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  issued_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS material_request_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_id uuid NOT NULL REFERENCES material_requests(id) ON DELETE CASCADE,
+  item_id uuid NOT NULL REFERENCES inventory_items(id) ON DELETE RESTRICT,
+  item_name text NOT NULL,
+  uom text,
+  quantity_requested numeric(14,2) NOT NULL DEFAULT 0,
+  quantity_issued numeric(14,2) NOT NULL DEFAULT 0,
+  notes text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_material_requests_status ON material_requests (status);
+CREATE INDEX IF NOT EXISTS idx_material_requests_requester ON material_requests (requested_by);
+CREATE INDEX IF NOT EXISTS idx_material_request_items_request ON material_request_items (request_id);
+CREATE INDEX IF NOT EXISTS idx_material_request_items_item ON material_request_items (item_id);
+
+DROP TRIGGER IF EXISTS trg_material_requests_updated_at ON material_requests;
+CREATE TRIGGER trg_material_requests_updated_at
+BEFORE UPDATE ON material_requests
+FOR EACH ROW EXECUTE FUNCTION public.touch_inventory_updated_at();
+
+ALTER TABLE material_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE material_request_items ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS material_requests_read ON material_requests;
+CREATE POLICY material_requests_read ON material_requests
+  FOR SELECT USING (
+    requested_by = public.current_employee_id()
+    OR public.has_any_privilege(ARRAY['inventory.view','inventory.manage','inventory.move','inventory.issue','admin.settings'])
+  );
+
+DROP POLICY IF EXISTS material_requests_insert ON material_requests;
+CREATE POLICY material_requests_insert ON material_requests
+  FOR INSERT WITH CHECK (
+    requested_by = public.current_employee_id()
+    OR public.has_any_privilege(ARRAY['inventory.manage','inventory.request','admin.settings'])
+  );
+
+DROP POLICY IF EXISTS material_requests_update ON material_requests;
+CREATE POLICY material_requests_update ON material_requests
+  FOR UPDATE USING (
+    requested_by = public.current_employee_id()
+    OR public.has_any_privilege(ARRAY['inventory.manage','inventory.issue','admin.settings'])
+  );
+
+DROP POLICY IF EXISTS material_requests_delete ON material_requests;
+CREATE POLICY material_requests_delete ON material_requests
+  FOR DELETE USING (
+    public.has_any_privilege(ARRAY['inventory.manage','admin.settings'])
+    OR (requested_by = public.current_employee_id() AND status IN ('PENDING','DRAFT','CANCELLED'))
+  );
+
+DROP POLICY IF EXISTS material_request_items_read ON material_request_items;
+CREATE POLICY material_request_items_read ON material_request_items
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM material_requests mr
+       WHERE mr.id = request_id
+         AND (
+           mr.requested_by = public.current_employee_id()
+           OR public.has_any_privilege(ARRAY['inventory.view','inventory.manage','inventory.move','inventory.issue','admin.settings'])
+         )
+    )
+  );
+
+DROP POLICY IF EXISTS material_request_items_write ON material_request_items;
+CREATE POLICY material_request_items_write ON material_request_items
+  FOR ALL USING (
+    EXISTS (
+      SELECT 1 FROM material_requests mr
+       WHERE mr.id = request_id
+         AND (
+           mr.requested_by = public.current_employee_id()
+           OR public.has_any_privilege(ARRAY['inventory.manage','inventory.request','inventory.issue','admin.settings'])
+         )
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM material_requests mr
+       WHERE mr.id = request_id
+         AND (
+           mr.requested_by = public.current_employee_id()
+           OR public.has_any_privilege(ARRAY['inventory.manage','inventory.request','inventory.issue','admin.settings'])
+         )
+    )
+  );
+
+-- Issue an approved material request: deduct stock for each line.
+CREATE OR REPLACE FUNCTION public.issue_material_request(p_request_id uuid)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_req material_requests%ROWTYPE;
+  v_count integer := 0;
+  r RECORD;
+BEGIN
+  IF NOT public.has_any_privilege(ARRAY['inventory.issue','inventory.manage','admin.settings']) THEN
+    RAISE EXCEPTION 'You do not have permission to issue material requests';
+  END IF;
+
+  SELECT * INTO v_req FROM material_requests WHERE id = p_request_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Material request not found'; END IF;
+  IF v_req.status = 'ISSUED' THEN RETURN 0; END IF;
+  IF v_req.status <> 'APPROVED' THEN
+    RAISE EXCEPTION 'Only approved material requests can be issued (current status: %)', v_req.status;
+  END IF;
+  IF v_req.warehouse_id IS NULL THEN
+    RAISE EXCEPTION 'This request has no warehouse to issue from';
+  END IF;
+
+  FOR r IN
+    SELECT id, item_id, quantity_requested
+      FROM material_request_items
+     WHERE request_id = p_request_id AND COALESCE(quantity_requested, 0) > 0
+  LOOP
+    PERFORM public.record_inventory_movement(
+      'ISSUE', r.item_id, v_req.warehouse_id, NULL, r.quantity_requested, NULL,
+      v_req.request_number,
+      'Issued against material request ' || v_req.request_number,
+      NULL, NULL, CURRENT_DATE
+    );
+    UPDATE material_request_items
+       SET quantity_issued = r.quantity_requested
+     WHERE id = r.id;
+    v_count := v_count + 1;
+  END LOOP;
+
+  UPDATE material_requests
+     SET status = 'ISSUED',
+         issued_by = public.current_employee_id(),
+         issued_at = now(),
+         updated_at = now()
+   WHERE id = p_request_id;
+
+  RETURN v_count;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.issue_material_request(uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.issue_material_request(uuid) FROM PUBLIC;
+
+-- ============================================================
+-- 6. Workflow integration for material requests
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.apply_workflow_result_to_record()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NEW.status IN ('APPROVED', 'REJECTED') AND (OLD.status IS DISTINCT FROM NEW.status) THEN
+    PERFORM set_config('app.workflow_approved', NEW.record_id::text, true);
+
+    IF NEW.module_key = 'leave' THEN
+      UPDATE leave_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'leave.encashment' THEN
+      UPDATE leave_encashment_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'expense' THEN
+      UPDATE expense_claims
+         SET status = NEW.status,
+             approved_by = CASE WHEN NEW.status = 'APPROVED' THEN public.current_employee_id() ELSE approved_by END,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE approved_at END,
+             rejected_by = CASE WHEN NEW.status = 'REJECTED' THEN public.current_employee_id() ELSE rejected_by END,
+             rejected_at = CASE WHEN NEW.status = 'REJECTED' THEN now() ELSE rejected_at END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'employee.change_request' THEN
+      IF NEW.status = 'APPROVED' THEN
+        PERFORM public.apply_employee_change_request(NEW.record_id);
+        UPDATE employee_change_requests
+           SET status = 'APPROVED',
+               reviewed_by = public.current_employee_id(),
+               reviewed_at = now()
+         WHERE id = NEW.record_id;
+      ELSE
+        UPDATE employee_change_requests
+           SET status = 'REJECTED',
+               reviewed_by = public.current_employee_id(),
+               reviewed_at = now()
+         WHERE id = NEW.record_id;
+      END IF;
+    ELSIF NEW.module_key = 'procurement.requisition' THEN
+      UPDATE procurement_requisitions
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.purchase_order' THEN
+      UPDATE purchase_orders
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.invoice' THEN
+      UPDATE procurement_invoices
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.payment' THEN
+      UPDATE procurement_payment_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'recruitment.requisition' THEN
+      UPDATE recruitment_requisitions
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'inventory.material_request' THEN
+      UPDATE material_requests
+         SET status = NEW.status,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_apply_workflow_result ON workflow_instances;
+CREATE TRIGGER trg_apply_workflow_result
+AFTER UPDATE ON workflow_instances
+FOR EACH ROW EXECUTE FUNCTION public.apply_workflow_result_to_record();
+
+-- Default approval chain for material requests (Manager -> HR Admin), enabled.
+DO $$
+DECLARE v_def uuid;
+BEGIN
+  INSERT INTO workflow_definitions (name, module_key, trigger_event, description, is_active)
+  VALUES (
+    'Material Request Approval', 'inventory.material_request', 'request.submitted',
+    'Default warehouse material request approval chain', true
+  ) ON CONFLICT (module_key, name) DO NOTHING RETURNING id INTO v_def;
+  IF v_def IS NULL THEN SELECT id INTO v_def FROM workflow_definitions WHERE module_key = 'inventory.material_request' LIMIT 1; END IF;
+  INSERT INTO workflow_steps (workflow_definition_id, sort_order, approver_role)
+  SELECT v_def, 1, 'MANAGER'
+    WHERE NOT EXISTS (SELECT 1 FROM workflow_steps ws WHERE ws.workflow_definition_id = v_def);
+  INSERT INTO workflow_steps (workflow_definition_id, sort_order, approver_role)
+  SELECT v_def, 2, 'HR_ADMIN'
+    WHERE NOT EXISTS (SELECT 1 FROM workflow_steps ws WHERE ws.workflow_definition_id = v_def AND ws.sort_order = 2);
+  INSERT INTO module_workflow_config (module_key, is_enabled, workflow_definition_id)
+  SELECT 'inventory.material_request', true, v_def
+    WHERE NOT EXISTS (SELECT 1 FROM module_workflow_config mc WHERE mc.module_key = 'inventory.material_request');
+END;
+$$;
+
+-- ============================================================
+-- 7. Product picture storage bucket (public read)
+-- ============================================================
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'inventory-items',
+  'inventory-items',
+  true,
+  5242880, -- 5 MB
+  ARRAY['image/png', 'image/jpeg', 'image/webp']
+)
+ON CONFLICT (id) DO NOTHING;
+
+DROP POLICY IF EXISTS inventory_items_images_read ON storage.objects;
+CREATE POLICY inventory_items_images_read ON storage.objects
+  FOR SELECT USING (bucket_id = 'inventory-items');
+
+DROP POLICY IF EXISTS inventory_items_images_insert ON storage.objects;
+CREATE POLICY inventory_items_images_insert ON storage.objects
+  FOR INSERT WITH CHECK (
+    bucket_id = 'inventory-items'
+    AND public.has_any_privilege(ARRAY['inventory.manage','admin.settings'])
+  );
+
+DROP POLICY IF EXISTS inventory_items_images_update ON storage.objects;
+CREATE POLICY inventory_items_images_update ON storage.objects
+  FOR UPDATE USING (
+    bucket_id = 'inventory-items'
+    AND public.has_any_privilege(ARRAY['inventory.manage','admin.settings'])
+  );
+
+DROP POLICY IF EXISTS inventory_items_images_delete ON storage.objects;
+CREATE POLICY inventory_items_images_delete ON storage.objects
+  FOR DELETE USING (
+    bucket_id = 'inventory-items'
+    AND public.has_any_privilege(ARRAY['inventory.manage','admin.settings'])
+  );
+
+-- ===========================================================================
+-- 20261017000009_certification_documents_bucket.sql
+-- ===========================================================================
+
+/*
+# Training certification document uploads.
+
+1. Adds `document_path` to `employee_certifications` so the stored storage
+   object can be located (and cleaned up) alongside the public `document_url`.
+2. Creates a public-read `certification-documents` storage bucket for
+   certificate images, mirroring the `inventory-items` product-picture bucket.
+   Uploads/updates/deletes are gated by `training.manage` / `admin.settings`.
+*/
+
+-- ============================================================
+-- 1. Certification document metadata
+-- ============================================================
+ALTER TABLE public.employee_certifications
+  ADD COLUMN IF NOT EXISTS document_path text;
+
+-- ============================================================
+-- 2. Certification documents storage bucket (public read)
+-- ============================================================
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'certification-documents',
+  'certification-documents',
+  true,
+  5242880, -- 5 MB
+  ARRAY['image/png', 'image/jpeg', 'image/webp']
+)
+ON CONFLICT (id) DO NOTHING;
+
+DROP POLICY IF EXISTS certification_documents_read ON storage.objects;
+CREATE POLICY certification_documents_read ON storage.objects
+  FOR SELECT USING (bucket_id = 'certification-documents');
+
+DROP POLICY IF EXISTS certification_documents_insert ON storage.objects;
+CREATE POLICY certification_documents_insert ON storage.objects
+  FOR INSERT WITH CHECK (
+    bucket_id = 'certification-documents'
+    AND public.has_any_privilege(ARRAY['training.manage','admin.settings'])
+  );
+
+DROP POLICY IF EXISTS certification_documents_update ON storage.objects;
+CREATE POLICY certification_documents_update ON storage.objects
+  FOR UPDATE USING (
+    bucket_id = 'certification-documents'
+    AND public.has_any_privilege(ARRAY['training.manage','admin.settings'])
+  );
+
+DROP POLICY IF EXISTS certification_documents_delete ON storage.objects;
+CREATE POLICY certification_documents_delete ON storage.objects
+  FOR DELETE USING (
+    bucket_id = 'certification-documents'
+    AND public.has_any_privilege(ARRAY['training.manage','admin.settings'])
+  );
+
+-- ===========================================================================
+-- 20261017000010_asset_management.sql
+-- ===========================================================================
+
+/*
+# Asset Management expansion — fleet, plant, machinery & ICT
+
+Grows the simple `assets` register into a full asset lifecycle module:
+
+ 1. `asset_categories`            — categorise assets (Automobile, Plant & Machinery,
+                                    ICT, Furniture, …) with a depreciation policy.
+ 2. `assets` gains category, location, picture, barcode and depreciation columns;
+    asset number + barcode are auto-generated and printable.
+ 3. `asset_vehicle_profiles`      — vehicle/engine attributes (engine cc, plugs,
+                                    fuel type, plate, odometer) for automobiles.
+ 4. `asset_repairs`               — repair history with cost implications.
+ 5. `asset_fuel_logs`             — fuel/petrol consumption with automatic
+                                    km-per-litre and a peer + own-trend anomaly
+                                    warning (same plugs / similar engine size /
+                                    similar odometer band).
+ 6. `asset_maintenance_schedules` — preventive maintenance (recurring calendar,
+                                    meter interval, or one-time date) with an
+                                    early warning window.
+ 7. `asset_maintenance_logs`      — completed maintenance; `complete_maintenance`
+                                    rolls the schedule forward.
+ 8. `vehicle_requests`            — vehicle booking routed through the generic
+                                    approval workflow (`assets.vehicle_request`);
+                                    the requester chooses who authorizes and who
+                                    gives final approval.
+
+New privileges: `assets.view`, `assets.repairs`, `assets.fleet`,
+`assets.maintenance`, `assets.request`. A public `asset-images` storage bucket
+holds asset pictures.
+*/
+
+-- ============================================================
+-- 1. Privilege catalog entries
+-- ============================================================
+INSERT INTO privilege_definitions (key, category, label, description, sort_order) VALUES
+  ('assets.view',        'Assets', 'View assets',             'Read the asset register, categories and history', 128),
+  ('assets.manage',      'Assets', 'Manage assets',           'Manage the asset catalog, assignments and categories', 130),
+  ('assets.repairs',     'Assets', 'Manage repairs',          'Record repairs and their cost implications', 132),
+  ('assets.fleet',       'Assets', 'Manage fleet & fuel',     'Manage vehicles and record fuel consumption', 134),
+  ('assets.maintenance', 'Assets', 'Manage maintenance',      'Set up preventive maintenance and log completed work', 136),
+  ('assets.request',     'Assets', 'Request vehicles',        'Raise vehicle requests', 138)
+ON CONFLICT (key) DO NOTHING;
+
+-- ============================================================
+-- 2. Asset categories
+-- ============================================================
+CREATE TABLE IF NOT EXISTS asset_categories (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  code text,
+  name text NOT NULL,
+  asset_class text NOT NULL DEFAULT 'OTHER',              -- AUTOMOBILE, PLANT_MACHINERY, ICT, FURNITURE, OFFICE, OTHER
+  description text,
+  depreciation_method text NOT NULL DEFAULT 'STRAIGHT_LINE', -- STRAIGHT_LINE, REDUCING_BALANCE, NONE
+  default_useful_life_years int,
+  default_rate numeric(6,2),
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_asset_categories_name ON asset_categories (lower(name));
+CREATE INDEX IF NOT EXISTS idx_asset_categories_active ON asset_categories (is_active);
+
+ALTER TABLE asset_categories ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 3. Extend assets
+-- ============================================================
+ALTER TABLE assets
+  ADD COLUMN IF NOT EXISTS category_id uuid REFERENCES asset_categories(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS barcode text,
+  ADD COLUMN IF NOT EXISTS location text,
+  ADD COLUMN IF NOT EXISTS image_url text,
+  ADD COLUMN IF NOT EXISTS image_path text,
+  ADD COLUMN IF NOT EXISTS salvage_value numeric(16,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS useful_life_years int,
+  ADD COLUMN IF NOT EXISTS depreciation_method text DEFAULT 'STRAIGHT_LINE',
+  ADD COLUMN IF NOT EXISTS depreciation_rate numeric(6,2),
+  ADD COLUMN IF NOT EXISTS depreciation_value numeric(16,2) DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS depreciation_date date,
+  ADD COLUMN IF NOT EXISTS book_value numeric(16,2),
+  ADD COLUMN IF NOT EXISTS notes text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_assets_barcode ON assets (barcode) WHERE barcode IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_assets_category ON assets (category_id);
+
+-- ============================================================
+-- 4. Vehicle profiles (1:1 with an automobile asset)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS asset_vehicle_profiles (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_id uuid NOT NULL UNIQUE REFERENCES assets(id) ON DELETE CASCADE,
+  plate_number text,
+  make text,
+  model text,
+  manufacture_year int,
+  fuel_type text DEFAULT 'PETROL',                          -- PETROL, DIESEL, CNG, HYBRID, ELECTRIC
+  engine_capacity_cc numeric(10,2),
+  num_plugs int,
+  tank_capacity numeric(10,2),
+  odometer numeric(12,2) NOT NULL DEFAULT 0,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_vehicle_profiles_asset ON asset_vehicle_profiles (asset_id);
+
+ALTER TABLE asset_vehicle_profiles ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 5. Repairs
+-- ============================================================
+CREATE TABLE IF NOT EXISTS asset_repairs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_id uuid NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  repair_number text,
+  repair_date date NOT NULL DEFAULT CURRENT_DATE,
+  description text NOT NULL,
+  vendor text,
+  cost numeric(16,2) NOT NULL DEFAULT 0,
+  downtime_days int,
+  status text NOT NULL DEFAULT 'COMPLETED',                 -- OPEN, IN_PROGRESS, COMPLETED, CANCELLED
+  odometer numeric(12,2),
+  performed_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  recorded_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  notes text,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_repairs_asset ON asset_repairs (asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_repairs_date ON asset_repairs (repair_date);
+CREATE INDEX IF NOT EXISTS idx_asset_repairs_status ON asset_repairs (status);
+
+ALTER TABLE asset_repairs ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 6. Fuel logs
+-- ============================================================
+CREATE TABLE IF NOT EXISTS asset_fuel_logs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_id uuid NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  log_date date NOT NULL DEFAULT CURRENT_DATE,
+  odometer numeric(12,2) NOT NULL,
+  previous_odometer numeric(12,2),
+  distance numeric(12,2),
+  litres numeric(12,2) NOT NULL,
+  unit_cost numeric(12,2),
+  total_cost numeric(16,2),
+  fuel_type text DEFAULT 'PETROL',
+  station text,
+  receipt_no text,
+  issued_to uuid REFERENCES employees(id) ON DELETE SET NULL,   -- driver / recipient
+  mileage_band text,                                             -- LOW / MEDIUM / HIGH (by odometer)
+  efficiency numeric(10,3),                                      -- distance / litres (km per litre)
+  expected_efficiency numeric(10,3),
+  own_avg_efficiency numeric(10,3),
+  peer_avg_efficiency numeric(10,3),
+  anomaly_flag boolean NOT NULL DEFAULT false,
+  anomaly_reason text,
+  recorded_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_fuel_logs_asset ON asset_fuel_logs (asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_fuel_logs_date ON asset_fuel_logs (log_date);
+CREATE INDEX IF NOT EXISTS idx_asset_fuel_logs_anomaly ON asset_fuel_logs (anomaly_flag);
+
+ALTER TABLE asset_fuel_logs ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 7. Preventive maintenance schedules
+-- ============================================================
+CREATE TABLE IF NOT EXISTS asset_maintenance_schedules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_id uuid NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  title text NOT NULL,
+  description text,
+  schedule_type text NOT NULL DEFAULT 'PREVENTIVE',        -- PREVENTIVE, CORRECTIVE, INSPECTION
+  recurrence text NOT NULL DEFAULT 'RECURRING',            -- RECURRING (calendar), INTERVAL (meter), ONE_TIME (specific date)
+  interval_days int,
+  interval_meter numeric(12,2),
+  lead_days int NOT NULL DEFAULT 7,                        -- early alert window
+  next_due_date date,
+  next_due_meter numeric(12,2),
+  last_completed_date date,
+  last_completed_meter numeric(12,2),
+  estimated_cost numeric(16,2),
+  is_active boolean NOT NULL DEFAULT true,
+  notes text,
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_maint_schedules_asset ON asset_maintenance_schedules (asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_maint_schedules_due ON asset_maintenance_schedules (next_due_date);
+CREATE INDEX IF NOT EXISTS idx_asset_maint_schedules_active ON asset_maintenance_schedules (is_active);
+
+ALTER TABLE asset_maintenance_schedules ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS asset_maintenance_logs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  schedule_id uuid REFERENCES asset_maintenance_schedules(id) ON DELETE SET NULL,
+  asset_id uuid NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  performed_date date NOT NULL DEFAULT CURRENT_DATE,
+  description text,
+  cost numeric(16,2) DEFAULT 0,
+  meter numeric(12,2),
+  vendor text,
+  performed_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  next_due_date date,
+  next_due_meter numeric(12,2),
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_maint_logs_asset ON asset_maintenance_logs (asset_id);
+CREATE INDEX IF NOT EXISTS idx_asset_maint_logs_schedule ON asset_maintenance_logs (schedule_id);
+
+ALTER TABLE asset_maintenance_logs ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 8. Vehicle requests
+-- ============================================================
+CREATE TABLE IF NOT EXISTS vehicle_requests (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_number text,
+  requested_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  vehicle_id uuid REFERENCES assets(id) ON DELETE SET NULL,
+  purpose text NOT NULL,
+  destination text,
+  departure_at timestamptz,
+  return_at timestamptz,
+  passengers int NOT NULL DEFAULT 1,
+  driver_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  status text NOT NULL DEFAULT 'DRAFT',                    -- DRAFT, PENDING, APPROVED, REJECTED, ASSIGNED, COMPLETED, CANCELLED
+  notes text,
+  approved_at timestamptz,
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vehicle_requests_status ON vehicle_requests (status);
+CREATE INDEX IF NOT EXISTS idx_vehicle_requests_requester ON vehicle_requests (requested_by);
+
+ALTER TABLE vehicle_requests ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS vehicle_request_passengers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_id uuid NOT NULL REFERENCES vehicle_requests(id) ON DELETE CASCADE,
+  employee_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  name text,
+  created_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vehicle_request_passengers_request ON vehicle_request_passengers (request_id);
+
+ALTER TABLE vehicle_request_passengers ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- 9. updated_at triggers
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.touch_asset_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_touch_asset_categories ON asset_categories;
+CREATE TRIGGER trg_touch_asset_categories BEFORE UPDATE ON asset_categories
+FOR EACH ROW EXECUTE FUNCTION public.touch_asset_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_asset_vehicle_profiles ON asset_vehicle_profiles;
+CREATE TRIGGER trg_touch_asset_vehicle_profiles BEFORE UPDATE ON asset_vehicle_profiles
+FOR EACH ROW EXECUTE FUNCTION public.touch_asset_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_asset_repairs ON asset_repairs;
+CREATE TRIGGER trg_touch_asset_repairs BEFORE UPDATE ON asset_repairs
+FOR EACH ROW EXECUTE FUNCTION public.touch_asset_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_asset_fuel_logs ON asset_fuel_logs;
+CREATE TRIGGER trg_touch_asset_fuel_logs BEFORE UPDATE ON asset_fuel_logs
+FOR EACH ROW EXECUTE FUNCTION public.touch_asset_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_asset_maint_schedules ON asset_maintenance_schedules;
+CREATE TRIGGER trg_touch_asset_maint_schedules BEFORE UPDATE ON asset_maintenance_schedules
+FOR EACH ROW EXECUTE FUNCTION public.touch_asset_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_vehicle_requests ON vehicle_requests;
+CREATE TRIGGER trg_touch_vehicle_requests BEFORE UPDATE ON vehicle_requests
+FOR EACH ROW EXECUTE FUNCTION public.touch_asset_updated_at();
+
+-- ============================================================
+-- 10. Auto asset number + barcode
+-- ============================================================
+CREATE SEQUENCE IF NOT EXISTS asset_tag_seq;
+
+CREATE OR REPLACE FUNCTION public.generate_asset_number()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_prefix text;
+  v_next bigint;
+  v_tag text;
+BEGIN
+  IF NEW.asset_tag IS NULL OR btrim(NEW.asset_tag) = '' THEN
+    SELECT NULLIF(upper(btrim(code)), '') INTO v_prefix
+      FROM asset_categories WHERE id = NEW.category_id;
+    v_prefix := COALESCE(v_prefix, 'AST');
+    LOOP
+      v_next := nextval('asset_tag_seq');
+      v_tag := v_prefix || '-' || lpad(v_next::text, 5, '0');
+      EXIT WHEN NOT EXISTS (SELECT 1 FROM assets WHERE asset_tag = v_tag);
+    END LOOP;
+    NEW.asset_tag := v_tag;
+  END IF;
+
+  IF NEW.barcode IS NULL OR btrim(NEW.barcode) = '' THEN
+    NEW.barcode := NEW.asset_tag;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_generate_asset_number ON assets;
+CREATE TRIGGER trg_generate_asset_number BEFORE INSERT ON assets
+FOR EACH ROW EXECUTE FUNCTION public.generate_asset_number();
+
+-- ============================================================
+-- 11. Automatic depreciation (straight line / reducing balance)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.compute_asset_depreciation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_years numeric;
+  v_accum numeric;
+  v_book numeric;
+  v_annual numeric;
+  v_depr_date date;
+BEGIN
+  IF NEW.purchase_value IS NULL OR NEW.purchase_date IS NULL THEN
+    IF NEW.book_value IS NULL THEN NEW.book_value := NEW.purchase_value; END IF;
+    RETURN NEW;
+  END IF;
+
+  v_depr_date := COALESCE(NEW.depreciation_date, CURRENT_DATE);
+  NEW.depreciation_date := v_depr_date;
+  v_years := GREATEST((v_depr_date - NEW.purchase_date)::numeric / 365.25, 0);
+  v_accum := 0;
+  v_book := NEW.purchase_value;
+
+  IF NEW.depreciation_method = 'STRAIGHT_LINE' THEN
+    IF COALESCE(NEW.useful_life_years, 0) > 0 THEN
+      v_annual := GREATEST(NEW.purchase_value - COALESCE(NEW.salvage_value, 0), 0) / NEW.useful_life_years;
+      v_accum := LEAST(v_annual * v_years, GREATEST(NEW.purchase_value - COALESCE(NEW.salvage_value, 0), 0));
+      v_book := NEW.purchase_value - v_accum;
+    END IF;
+  ELSIF NEW.depreciation_method = 'REDUCING_BALANCE' THEN
+    IF COALESCE(NEW.depreciation_rate, 0) > 0 THEN
+      v_book := GREATEST(NEW.purchase_value * power(1 - (NEW.depreciation_rate / 100.0), v_years), COALESCE(NEW.salvage_value, 0));
+      v_accum := NEW.purchase_value - v_book;
+    END IF;
+  END IF;
+
+  NEW.depreciation_value := round(v_accum, 2);
+  NEW.book_value := round(v_book, 2);
+  NEW.current_value := round(v_book, 2);
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_compute_asset_depreciation ON assets;
+CREATE TRIGGER trg_compute_asset_depreciation BEFORE INSERT OR UPDATE ON assets
+FOR EACH ROW EXECUTE FUNCTION public.compute_asset_depreciation();
+
+-- ============================================================
+-- 12. Fuel metrics + anomaly detection (peer + own trend)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.compute_fuel_log_metrics()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_prev_odo numeric;
+  v_dist numeric;
+  v_eff numeric;
+  v_own_avg numeric;
+  v_peer_avg numeric;
+  v_cc numeric;
+  v_plugs int;
+  v_fuel text;
+  v_band text;
+  v_tol constant numeric := 0.20;   -- engine size tolerance ±20%
+  v_drop constant numeric := 0.20;  -- flag when 20% worse than the benchmark
+BEGIN
+  -- Mileage band from the odometer reading.
+  IF NEW.odometer < 50000 THEN v_band := 'LOW';
+  ELSIF NEW.odometer < 200000 THEN v_band := 'MEDIUM';
+  ELSE v_band := 'HIGH';
+  END IF;
+  NEW.mileage_band := v_band;
+
+  -- Previous fill for this vehicle (highest odometer below the current one).
+  SELECT odometer INTO v_prev_odo
+    FROM asset_fuel_logs
+   WHERE asset_id = NEW.asset_id
+     AND (NEW.id IS NULL OR id <> NEW.id)
+     AND odometer < NEW.odometer
+   ORDER BY odometer DESC
+   LIMIT 1;
+
+  NEW.previous_odometer := v_prev_odo;
+  IF v_prev_odo IS NOT NULL AND NEW.odometer > v_prev_odo AND COALESCE(NEW.litres, 0) > 0 THEN
+    v_dist := NEW.odometer - v_prev_odo;
+    v_eff := round(v_dist / NEW.litres, 3);
+    NEW.distance := v_dist;
+    NEW.efficiency := v_eff;
+  ELSE
+    NEW.distance := NULL;
+    NEW.efficiency := NULL;
+  END IF;
+
+  -- This vehicle's own trailing average (last 6 fills).
+  SELECT round(avg(s.efficiency), 3) INTO v_own_avg
+    FROM (
+      SELECT efficiency FROM asset_fuel_logs
+       WHERE asset_id = NEW.asset_id
+         AND (NEW.id IS NULL OR id <> NEW.id)
+         AND efficiency IS NOT NULL
+       ORDER BY log_date DESC, created_at DESC
+       LIMIT 6
+    ) s;
+  NEW.own_avg_efficiency := v_own_avg;
+
+  -- Vehicle attributes for peer matching.
+  SELECT engine_capacity_cc, num_plugs, COALESCE(fuel_type, 'PETROL')
+    INTO v_cc, v_plugs, v_fuel
+    FROM asset_vehicle_profiles WHERE asset_id = NEW.asset_id;
+
+  -- Peer average: other vehicles with same plugs + fuel + similar engine size + same band.
+  SELECT round(avg(f.efficiency), 3) INTO v_peer_avg
+    FROM asset_fuel_logs f
+    JOIN asset_vehicle_profiles p ON p.asset_id = f.asset_id
+   WHERE f.asset_id <> NEW.asset_id
+     AND f.efficiency IS NOT NULL
+     AND p.num_plugs IS NOT DISTINCT FROM v_plugs
+     AND COALESCE(p.fuel_type, 'PETROL') = v_fuel
+     AND (CASE WHEN f.odometer < 50000 THEN 'LOW' WHEN f.odometer < 200000 THEN 'MEDIUM' ELSE 'HIGH' END) = v_band
+     AND v_cc IS NOT NULL AND p.engine_capacity_cc IS NOT NULL
+     AND abs(p.engine_capacity_cc - v_cc) <= v_cc * v_tol;
+  NEW.peer_avg_efficiency := v_peer_avg;
+
+  -- Decision: worse than peers OR worse than own trend.
+  NEW.anomaly_flag := false;
+  NEW.anomaly_reason := NULL;
+  IF NEW.efficiency IS NOT NULL THEN
+    NEW.expected_efficiency := COALESCE(v_peer_avg, v_own_avg);
+    IF v_peer_avg IS NOT NULL AND v_peer_avg > 0 AND NEW.efficiency < v_peer_avg * (1 - v_drop) THEN
+      NEW.anomaly_flag := true;
+      NEW.anomaly_reason := format(
+        'Fuel efficiency %s km/L is %s%% below similar vehicles (peer average %s km/L).',
+        NEW.efficiency, round((1 - NEW.efficiency / v_peer_avg) * 100), v_peer_avg);
+    ELSIF v_own_avg IS NOT NULL AND v_own_avg > 0 AND NEW.efficiency < v_own_avg * (1 - v_drop) THEN
+      NEW.anomaly_flag := true;
+      NEW.anomaly_reason := format(
+        'Fuel efficiency %s km/L is %s%% below this vehicle''s own average (%s km/L).',
+        NEW.efficiency, round((1 - NEW.efficiency / v_own_avg) * 100), v_own_avg);
+    END IF;
+  ELSE
+    NEW.expected_efficiency := NULL;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_compute_fuel_log_metrics ON asset_fuel_logs;
+CREATE TRIGGER trg_compute_fuel_log_metrics BEFORE INSERT OR UPDATE ON asset_fuel_logs
+FOR EACH ROW EXECUTE FUNCTION public.compute_fuel_log_metrics();
+
+-- ============================================================
+-- 13. Complete a maintenance schedule (roll it forward)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.complete_maintenance(
+  p_schedule_id uuid,
+  p_performed_date date DEFAULT CURRENT_DATE,
+  p_cost numeric DEFAULT 0,
+  p_meter numeric DEFAULT NULL,
+  p_description text DEFAULT NULL,
+  p_vendor text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_sched asset_maintenance_schedules%ROWTYPE;
+  v_actor uuid := public.current_employee_id();
+  v_next_date date;
+  v_next_meter numeric;
+  v_log_id uuid;
+BEGIN
+  IF NOT public.has_any_privilege(ARRAY['assets.maintenance','assets.manage','admin.settings']) THEN
+    RAISE EXCEPTION 'You do not have permission to complete maintenance';
+  END IF;
+
+  SELECT * INTO v_sched FROM asset_maintenance_schedules WHERE id = p_schedule_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Maintenance schedule not found'; END IF;
+
+  IF v_sched.recurrence = 'RECURRING' THEN
+    v_next_date := COALESCE(p_performed_date, CURRENT_DATE) + COALESCE(v_sched.interval_days, 0);
+    v_next_meter := v_sched.next_due_meter;
+  ELSIF v_sched.recurrence = 'INTERVAL' THEN
+    v_next_meter := COALESCE(p_meter, v_sched.next_due_meter, 0) + COALESCE(v_sched.interval_meter, 0);
+    v_next_date := CASE WHEN COALESCE(v_sched.interval_days, 0) > 0
+                        THEN COALESCE(p_performed_date, CURRENT_DATE) + v_sched.interval_days
+                        ELSE NULL END;
+  ELSE -- ONE_TIME
+    v_next_date := NULL;
+    v_next_meter := NULL;
+  END IF;
+
+  INSERT INTO asset_maintenance_logs (
+    schedule_id, asset_id, performed_date, description, cost, meter, vendor, performed_by, next_due_date, next_due_meter
+  ) VALUES (
+    v_sched.id, v_sched.asset_id, COALESCE(p_performed_date, CURRENT_DATE), p_description, COALESCE(p_cost, 0),
+    p_meter, p_vendor, v_actor, v_next_date, v_next_meter
+  ) RETURNING id INTO v_log_id;
+
+  UPDATE asset_maintenance_schedules
+     SET last_completed_date = COALESCE(p_performed_date, CURRENT_DATE),
+         last_completed_meter = COALESCE(p_meter, last_completed_meter),
+         next_due_date = v_next_date,
+         next_due_meter = v_next_meter,
+         is_active = CASE WHEN v_sched.recurrence = 'ONE_TIME' THEN false ELSE is_active END,
+         updated_at = now()
+   WHERE id = v_sched.id;
+
+  RETURN v_log_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.complete_maintenance(uuid, date, numeric, numeric, text, text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.complete_maintenance(uuid, date, numeric, numeric, text, text) FROM PUBLIC;
+
+-- ============================================================
+-- 14. Row level security
+-- ============================================================
+DROP POLICY IF EXISTS "select_assets" ON assets;
+DROP POLICY IF EXISTS "insert_assets" ON assets;
+DROP POLICY IF EXISTS "update_assets" ON assets;
+DROP POLICY IF EXISTS "delete_assets" ON assets;
+CREATE POLICY "select_assets" ON assets FOR SELECT TO authenticated
+  USING (assigned_to = public.current_employee_id()
+         OR public.has_any_privilege(ARRAY['assets.view','assets.manage','admin.settings','admin.reports_read']));
+CREATE POLICY "insert_assets" ON assets FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.manage','admin.settings']));
+CREATE POLICY "update_assets" ON assets FOR UPDATE TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.manage','admin.settings']));
+CREATE POLICY "delete_assets" ON assets FOR DELETE TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','admin.settings']));
+
+DROP POLICY IF EXISTS "select_asset_categories" ON asset_categories;
+DROP POLICY IF EXISTS "insert_asset_categories" ON asset_categories;
+DROP POLICY IF EXISTS "update_asset_categories" ON asset_categories;
+DROP POLICY IF EXISTS "delete_asset_categories" ON asset_categories;
+CREATE POLICY "select_asset_categories" ON asset_categories FOR SELECT TO authenticated USING (true);
+CREATE POLICY "insert_asset_categories" ON asset_categories FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.manage','admin.settings']));
+CREATE POLICY "update_asset_categories" ON asset_categories FOR UPDATE TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.manage','admin.settings']));
+CREATE POLICY "delete_asset_categories" ON asset_categories FOR DELETE TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','admin.settings']));
+
+DROP POLICY IF EXISTS "select_asset_vehicle_profiles" ON asset_vehicle_profiles;
+DROP POLICY IF EXISTS "write_asset_vehicle_profiles" ON asset_vehicle_profiles;
+CREATE POLICY "select_asset_vehicle_profiles" ON asset_vehicle_profiles FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.view','assets.manage','assets.fleet','assets.maintenance','admin.settings']));
+CREATE POLICY "write_asset_vehicle_profiles" ON asset_vehicle_profiles FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','assets.fleet','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.manage','assets.fleet','admin.settings']));
+
+DROP POLICY IF EXISTS "select_asset_repairs" ON asset_repairs;
+DROP POLICY IF EXISTS "write_asset_repairs" ON asset_repairs;
+CREATE POLICY "select_asset_repairs" ON asset_repairs FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.view','assets.manage','assets.repairs','assets.maintenance','admin.settings']));
+CREATE POLICY "write_asset_repairs" ON asset_repairs FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','assets.repairs','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.manage','assets.repairs','admin.settings']));
+
+DROP POLICY IF EXISTS "select_asset_fuel_logs" ON asset_fuel_logs;
+DROP POLICY IF EXISTS "write_asset_fuel_logs" ON asset_fuel_logs;
+CREATE POLICY "select_asset_fuel_logs" ON asset_fuel_logs FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.view','assets.manage','assets.fleet','admin.settings']));
+CREATE POLICY "write_asset_fuel_logs" ON asset_fuel_logs FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','assets.fleet','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.manage','assets.fleet','admin.settings']));
+
+DROP POLICY IF EXISTS "select_asset_maint_schedules" ON asset_maintenance_schedules;
+DROP POLICY IF EXISTS "write_asset_maint_schedules" ON asset_maintenance_schedules;
+CREATE POLICY "select_asset_maint_schedules" ON asset_maintenance_schedules FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.view','assets.manage','assets.maintenance','admin.settings']));
+CREATE POLICY "write_asset_maint_schedules" ON asset_maintenance_schedules FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','assets.maintenance','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.manage','assets.maintenance','admin.settings']));
+
+DROP POLICY IF EXISTS "select_asset_maint_logs" ON asset_maintenance_logs;
+DROP POLICY IF EXISTS "write_asset_maint_logs" ON asset_maintenance_logs;
+CREATE POLICY "select_asset_maint_logs" ON asset_maintenance_logs FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.view','assets.manage','assets.maintenance','admin.settings']));
+CREATE POLICY "write_asset_maint_logs" ON asset_maintenance_logs FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','assets.maintenance','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.manage','assets.maintenance','admin.settings']));
+
+DROP POLICY IF EXISTS "select_vehicle_requests" ON vehicle_requests;
+DROP POLICY IF EXISTS "insert_vehicle_requests" ON vehicle_requests;
+DROP POLICY IF EXISTS "update_vehicle_requests" ON vehicle_requests;
+DROP POLICY IF EXISTS "delete_vehicle_requests" ON vehicle_requests;
+CREATE POLICY "select_vehicle_requests" ON vehicle_requests FOR SELECT TO authenticated
+  USING (requested_by = public.current_employee_id()
+         OR created_by = public.current_employee_id()
+         OR public.has_any_privilege(ARRAY['assets.view','assets.manage','assets.request','admin.settings']));
+CREATE POLICY "insert_vehicle_requests" ON vehicle_requests FOR INSERT TO authenticated
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.request','assets.manage','admin.settings']));
+CREATE POLICY "update_vehicle_requests" ON vehicle_requests FOR UPDATE TO authenticated
+  USING (requested_by = public.current_employee_id()
+         OR public.has_any_privilege(ARRAY['assets.request','assets.manage','admin.settings']))
+  WITH CHECK (requested_by = public.current_employee_id()
+         OR public.has_any_privilege(ARRAY['assets.request','assets.manage','admin.settings']));
+CREATE POLICY "delete_vehicle_requests" ON vehicle_requests FOR DELETE TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.manage','admin.settings']));
+
+DROP POLICY IF EXISTS "select_vehicle_request_passengers" ON vehicle_request_passengers;
+DROP POLICY IF EXISTS "write_vehicle_request_passengers" ON vehicle_request_passengers;
+CREATE POLICY "select_vehicle_request_passengers" ON vehicle_request_passengers FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.view','assets.manage','assets.request','admin.settings'])
+         OR EXISTS (SELECT 1 FROM vehicle_requests vr
+                     WHERE vr.id = request_id
+                       AND (vr.requested_by = public.current_employee_id() OR vr.created_by = public.current_employee_id())));
+CREATE POLICY "write_vehicle_request_passengers" ON vehicle_request_passengers FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['assets.request','assets.manage','admin.settings'])
+         OR EXISTS (SELECT 1 FROM vehicle_requests vr
+                     WHERE vr.id = request_id
+                       AND (vr.requested_by = public.current_employee_id() OR vr.created_by = public.current_employee_id())))
+  WITH CHECK (public.has_any_privilege(ARRAY['assets.request','assets.manage','admin.settings'])
+         OR EXISTS (SELECT 1 FROM vehicle_requests vr
+                     WHERE vr.id = request_id
+                       AND (vr.requested_by = public.current_employee_id() OR vr.created_by = public.current_employee_id())));
+
+-- ============================================================
+-- 15. Workflow integration for vehicle requests
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.apply_workflow_result_to_record()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NEW.status IN ('APPROVED', 'REJECTED') AND (OLD.status IS DISTINCT FROM NEW.status) THEN
+    PERFORM set_config('app.workflow_approved', NEW.record_id::text, true);
+
+    IF NEW.module_key = 'leave' THEN
+      UPDATE leave_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'leave.encashment' THEN
+      UPDATE leave_encashment_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'expense' THEN
+      UPDATE expense_claims
+         SET status = NEW.status,
+             approved_by = CASE WHEN NEW.status = 'APPROVED' THEN public.current_employee_id() ELSE approved_by END,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE approved_at END,
+             rejected_by = CASE WHEN NEW.status = 'REJECTED' THEN public.current_employee_id() ELSE rejected_by END,
+             rejected_at = CASE WHEN NEW.status = 'REJECTED' THEN now() ELSE rejected_at END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'employee.change_request' THEN
+      IF NEW.status = 'APPROVED' THEN
+        PERFORM public.apply_employee_change_request(NEW.record_id);
+        UPDATE employee_change_requests
+           SET status = 'APPROVED',
+               reviewed_by = public.current_employee_id(),
+               reviewed_at = now()
+         WHERE id = NEW.record_id;
+      ELSE
+        UPDATE employee_change_requests
+           SET status = 'REJECTED',
+               reviewed_by = public.current_employee_id(),
+               reviewed_at = now()
+         WHERE id = NEW.record_id;
+      END IF;
+    ELSIF NEW.module_key = 'procurement.requisition' THEN
+      UPDATE procurement_requisitions
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.purchase_order' THEN
+      UPDATE purchase_orders
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.invoice' THEN
+      UPDATE procurement_invoices
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'procurement.payment' THEN
+      UPDATE procurement_payment_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'recruitment.requisition' THEN
+      UPDATE recruitment_requisitions
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE NULL END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'inventory.material_request' THEN
+      UPDATE material_requests
+         SET status = NEW.status,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    ELSIF NEW.module_key = 'assets.vehicle_request' THEN
+      UPDATE vehicle_requests
+         SET status = NEW.status,
+             approved_at = CASE WHEN NEW.status = 'APPROVED' THEN now() ELSE approved_at END,
+             updated_at = now()
+       WHERE id = NEW.record_id;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_apply_workflow_result ON workflow_instances;
+CREATE TRIGGER trg_apply_workflow_result
+AFTER UPDATE ON workflow_instances
+FOR EACH ROW EXECUTE FUNCTION public.apply_workflow_result_to_record();
+
+-- Default vehicle request chain (2 steps). The requester overrides the actors
+-- at submission time (authorizer + approver) via set_workflow_actors.
+DO $$
+DECLARE v_def uuid;
+BEGIN
+  INSERT INTO workflow_definitions (name, module_key, trigger_event, description, is_active)
+  VALUES (
+    'Vehicle Request Approval', 'assets.vehicle_request', 'request.submitted',
+    'Default vehicle request approval chain', true
+  ) ON CONFLICT (module_key, name) DO NOTHING RETURNING id INTO v_def;
+  IF v_def IS NULL THEN SELECT id INTO v_def FROM workflow_definitions WHERE module_key = 'assets.vehicle_request' LIMIT 1; END IF;
+  INSERT INTO workflow_steps (workflow_definition_id, sort_order, approver_role)
+  SELECT v_def, 1, 'MANAGER'
+    WHERE NOT EXISTS (SELECT 1 FROM workflow_steps ws WHERE ws.workflow_definition_id = v_def);
+  INSERT INTO workflow_steps (workflow_definition_id, sort_order, approver_role)
+  SELECT v_def, 2, 'HR_ADMIN'
+    WHERE NOT EXISTS (SELECT 1 FROM workflow_steps ws WHERE ws.workflow_definition_id = v_def AND ws.sort_order = 2);
+  INSERT INTO module_workflow_config (module_key, is_enabled, workflow_definition_id)
+  SELECT 'assets.vehicle_request', true, v_def
+    WHERE NOT EXISTS (SELECT 1 FROM module_workflow_config mc WHERE mc.module_key = 'assets.vehicle_request');
+END;
+$$;
+
+-- ============================================================
+-- 16. Asset picture storage bucket (public read)
+-- ============================================================
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'asset-images',
+  'asset-images',
+  true,
+  5242880, -- 5 MB
+  ARRAY['image/png', 'image/jpeg', 'image/webp']
+)
+ON CONFLICT (id) DO NOTHING;
+
+DROP POLICY IF EXISTS asset_images_read ON storage.objects;
+CREATE POLICY asset_images_read ON storage.objects
+  FOR SELECT USING (bucket_id = 'asset-images');
+
+DROP POLICY IF EXISTS asset_images_insert ON storage.objects;
+CREATE POLICY asset_images_insert ON storage.objects
+  FOR INSERT WITH CHECK (
+    bucket_id = 'asset-images'
+    AND public.has_any_privilege(ARRAY['assets.manage','admin.settings'])
+  );
+
+DROP POLICY IF EXISTS asset_images_update ON storage.objects;
+CREATE POLICY asset_images_update ON storage.objects
+  FOR UPDATE USING (
+    bucket_id = 'asset-images'
+    AND public.has_any_privilege(ARRAY['assets.manage','admin.settings'])
+  );
+
+DROP POLICY IF EXISTS asset_images_delete ON storage.objects;
+CREATE POLICY asset_images_delete ON storage.objects
+  FOR DELETE USING (
+    bucket_id = 'asset-images'
+    AND public.has_any_privilege(ARRAY['assets.manage','admin.settings'])
+  );
+
+-- ============================================================
+-- 17. Seed asset categories (idempotent)
+-- ============================================================
+INSERT INTO asset_categories (code, name, asset_class, description, depreciation_method, default_useful_life_years, default_rate)
+VALUES
+  ('AUTO',  'Automobiles',            'AUTOMOBILE',      'Cars, vans, trucks and other vehicles', 'REDUCING_BALANCE', 8,  25.00),
+  ('PLANT', 'Plant & Machinery',       'PLANT_MACHINERY', 'Generators, heavy plant and production machinery', 'STRAIGHT_LINE', 10, NULL),
+  ('ICT',   'ICT Equipment',           'ICT',             'Computers, servers, network and ICT gadgets', 'STRAIGHT_LINE', 4, NULL),
+  ('FUR',   'Furniture & Fittings',    'FURNITURE',       'Office furniture and fittings', 'STRAIGHT_LINE', 10, NULL),
+  ('OFF',   'Office Equipment',        'OFFICE',          'Printers, scanners and general office equipment', 'STRAIGHT_LINE', 5, NULL),
+  ('OTH',   'Other Assets',            'OTHER',           'Assets that do not fit the other categories', 'STRAIGHT_LINE', 5, NULL)
+ON CONFLICT DO NOTHING;
+
+-- ===========================================================================
 -- DEFAULT ADMIN EMPLOYEE (role SUPER_ADMIN => every privilege)
 -- Login:    noah.linus@constrabase.com
 -- Password: <replace the placeholder below with a strong password>

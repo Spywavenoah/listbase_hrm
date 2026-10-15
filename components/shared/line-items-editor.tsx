@@ -18,12 +18,22 @@ export interface LineItem {
   total: number;
 }
 
+export interface CatalogItem {
+  id: string;
+  name: string;
+  uom: string | null;
+  unit_price: number;
+  description: string | null;
+}
+
 export interface LineItemsEditorProps {
   items: LineItem[];
   onChange: (items: LineItem[]) => void;
   showUom?: boolean;
   showPrice?: boolean;
   priceLabel?: string;
+  catalog?: CatalogItem[];
+  catalogListId?: string;
 }
 
 const parseNum = (s: string) => {
@@ -37,6 +47,8 @@ export function LineItemsEditor({
   showUom = true,
   showPrice = true,
   priceLabel = 'Unit price',
+  catalog,
+  catalogListId = 'master-items-list',
 }: LineItemsEditorProps) {
   const [raw, setRaw] = useState<Record<string, { quantity?: string; unit_price?: string }>>({});
 
@@ -45,6 +57,20 @@ export function LineItemsEditor({
       ...items,
       { id: `tmp-${Date.now()}-${items.length}`, item_name: '', quantity: 1, uom: 'EA', unit_price: 0, total: 0 },
     ]);
+  };
+
+  const applyCatalog = (id: string, name: string) => {
+    const match = catalog?.find((c) => c.name.toLowerCase() === name.toLowerCase());
+    if (!match) {
+      updateItem(id, { item_name: name });
+      return;
+    }
+    updateItem(id, {
+      item_name: match.name,
+      uom: match.uom || 'EA',
+      unit_price: Number(match.unit_price) || 0,
+      description: match.description || undefined,
+    });
   };
 
   const updateItem = (id: string, patch: Partial<LineItem>) => {
@@ -103,8 +129,9 @@ export function LineItemsEditor({
             <div className="space-y-1">
               <Input
                 placeholder="Item name"
+                list={catalog ? catalogListId : undefined}
                 value={it.item_name}
-                onChange={(e) => updateItem(it.id, { item_name: e.target.value })}
+                onChange={(e) => (catalog ? applyCatalog(it.id, e.target.value) : updateItem(it.id, { item_name: e.target.value }))}
               />
               <Input
                 placeholder="Description (optional)"
@@ -147,6 +174,20 @@ export function LineItemsEditor({
       {items.length === 0 && (
         <p className="text-xs text-muted-foreground">No items yet. Add at least one line item.</p>
       )}
+      {catalog && catalog.length > 0 && (
+        <datalist id={catalogListId}>
+          {catalog.map((c) => (
+            <option key={c.id} value={c.name}>
+              {c.uom ? `(${c.uom}) ` : ''}
+              {formatMoney(c.unit_price)}
+            </option>
+          ))}
+        </datalist>
+      )}
     </div>
   );
+}
+
+function formatMoney(n: number) {
+  return `$${Number(n || 0).toLocaleString()}`;
 }

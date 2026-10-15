@@ -78,7 +78,12 @@ export const PRIVILEGE_CATEGORIES: PrivilegeCategory[] = [
     key: 'assets',
     label: 'Assets',
     privileges: [
-      { key: 'assets.manage', label: 'Manage assets', description: 'Manage the asset catalog and assignments' },
+      { key: 'assets.view', label: 'View assets', description: 'Read the asset register, categories and history' },
+      { key: 'assets.manage', label: 'Manage assets', description: 'Manage the asset catalog, assignments and categories' },
+      { key: 'assets.repairs', label: 'Manage repairs', description: 'Record repairs and their cost implications' },
+      { key: 'assets.fleet', label: 'Manage fleet & fuel', description: 'Manage vehicles and record fuel consumption' },
+      { key: 'assets.maintenance', label: 'Manage maintenance', description: 'Set up preventive maintenance and log completed work' },
+      { key: 'assets.request', label: 'Request vehicles', description: 'Raise vehicle requests' },
     ],
   },
   {
@@ -110,6 +115,18 @@ export const PRIVILEGE_CATEGORIES: PrivilegeCategory[] = [
       { key: 'procurement.payment_approve', label: 'Approve payment requests', description: 'Approve or reject payment requests' },
       { key: 'procurement.contract_manage', label: 'Manage contracts', description: 'Create and manage supplier contracts' },
       { key: 'procurement.settings', label: 'Manage procurement settings', description: 'Manage categories and evaluation criteria' },
+    ],
+  },
+  {
+    key: 'inventory',
+    label: 'Inventory',
+    privileges: [
+      { key: 'inventory.view', label: 'View inventory', description: 'Read warehouses, items, stock levels and movement history' },
+      { key: 'inventory.manage', label: 'Manage inventory', description: 'Create and edit inventory items and stock records' },
+      { key: 'inventory.move', label: 'Record stock movements', description: 'Record receipts, issues, transfers and adjustments' },
+      { key: 'inventory.request', label: 'Create material requests', description: 'Raise material requests to release items from a warehouse' },
+      { key: 'inventory.issue', label: 'Issue warehouse items', description: 'Approve and issue material requests, deducting stock' },
+      { key: 'inventory.settings', label: 'Manage warehouses & setup', description: 'Create warehouses and organise inventory categories' },
     ],
   },
   {

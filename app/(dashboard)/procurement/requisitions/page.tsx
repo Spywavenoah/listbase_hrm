@@ -12,7 +12,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
-import { LineItemsEditor, type LineItem } from '@/components/shared/line-items-editor';
+import { LineItemsEditor, type LineItem, type CatalogItem } from '@/components/shared/line-items-editor';
 import { ProcurementEmployeePicker } from '@/components/shared/procurement-employee-picker';
 import { refNumber, fmtMoney, procStatusClass, PRIORITIES, PURCHASE_TYPES, CURRENCIES } from '@/lib/procurement';
 import { startWorkflow, setWorkflowActors } from '@/lib/workflow/engine';
@@ -48,6 +48,7 @@ export default function RequisitionsPage() {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [itemsByReq, setItemsByReq] = useState<Record<string, LineItem[]>>({});
+  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [employeeNames, setEmployeeNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
 
@@ -86,6 +87,18 @@ export default function RequisitionsPage() {
       setRows((rRes.data || []) as unknown as Requisition[]);
       setDepartments(dRes.data || []);
       setCategories(cRes.data || []);
+      const { data: itemCatalog } = await supabase
+        .from('inventory_items')
+        .select('id, name, uom, unit_cost, description')
+        .eq('is_active', true)
+        .order('name');
+      setCatalog((itemCatalog || []).map((i) => ({
+        id: i.id,
+        name: i.name,
+        uom: i.uom,
+        unit_price: Number(i.unit_cost) || 0,
+        description: i.description,
+      })) as unknown as CatalogItem[]);
       const names: Record<string, string> = {};
       for (const e of (empRes.data || []) as { id: string; name: string }[]) names[e.id] = e.name;
       setEmployeeNames(names);
@@ -391,7 +404,7 @@ export default function RequisitionsPage() {
               </div>
             </div>
 
-            <LineItemsEditor items={items} onChange={setItems} priceLabel="Est. unit price" />
+            <LineItemsEditor items={items} onChange={setItems} priceLabel="Est. unit price" catalog={catalog} />
             {items.length > 0 && (
               <p className="text-right text-sm font-medium">
                 Estimated total: {fmtMoney(items.reduce((s, i) => s + Number(i.total || 0), 0), form.currency)}

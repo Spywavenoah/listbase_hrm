@@ -12,7 +12,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
-import { LineItemsEditor, type LineItem } from '@/components/shared/line-items-editor';
+import { LineItemsEditor, type LineItem, type CatalogItem } from '@/components/shared/line-items-editor';
 import { refNumber, fmtMoney, procStatusClass, CURRENCIES } from '@/lib/procurement';
 import { startWorkflow, setWorkflowActors } from '@/lib/workflow/engine';
 import { WorkflowSubmitDialog } from '@/components/workflow/workflow-submit-dialog';
@@ -57,6 +57,7 @@ export default function InvoicesPage() {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [pos, setPos] = useState<PO[]>([]);
   const [poItems, setPoItems] = useState<POItem[]>([]);
+  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [itemsByInvoice, setItemsByInvoice] = useState<Record<string, InvoiceItem[]>>({});
   const [loading, setLoading] = useState(true);
 
@@ -92,6 +93,18 @@ export default function InvoicesPage() {
       setVendors(vRes.data || []);
       setPos(pRes.data || []);
       setPoItems((piRes.data || []) as unknown as POItem[]);
+      const { data: itemCatalog } = await supabase
+        .from('inventory_items')
+        .select('id, name, uom, unit_cost, description')
+        .eq('is_active', true)
+        .order('name');
+      setCatalog((itemCatalog || []).map((i) => ({
+        id: i.id,
+        name: i.name,
+        uom: i.uom,
+        unit_price: Number(i.unit_cost) || 0,
+        description: i.description,
+      })) as unknown as CatalogItem[]);
       const grouped: Record<string, InvoiceItem[]> = {};
       for (const it of (iiRes.data || []) as unknown as InvoiceItem[]) {
         (grouped[it.invoice_id] = grouped[it.invoice_id] || []).push(it);
@@ -358,7 +371,7 @@ export default function InvoicesPage() {
               </div>
             </div>
 
-            <LineItemsEditor items={items} onChange={setItems} showUom={false} />
+            <LineItemsEditor items={items} onChange={setItems} showUom={false} catalog={catalog} />
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">

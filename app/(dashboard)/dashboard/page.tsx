@@ -1,13 +1,30 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Users, UserPlus, CalendarDays, Wallet, TrendingUp, TrendingDown, Clock, Package, CheckCircle2, Circle, ArrowRight, AlertCircle } from 'lucide-react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Users, UserPlus, CalendarDays, Wallet, Clock, Package, CheckCircle2, Circle, ArrowRight, AlertCircle, Settings2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { cn } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 import { useAccess } from '@/lib/access';
+import { storage } from '@/lib/storage';
+import {
+  widgetsForAccess,
+  defaultWidgetIds,
+  isOrgViewer,
+  type DashboardWidgetDef,
+} from '@/lib/dashboard-widgets';
+import {
+  MyProfileWidget,
+  MyLeaveWidget,
+  MyAttendanceWidget,
+  MyTasksWidget,
+  MyRequestsWidget,
+} from './personal-widgets';
 import type { Employee } from '@/lib/types';
 
 export const dynamicParams = true;
@@ -26,9 +43,52 @@ interface DashboardStats {
   totalAssets: number;
 }
 
+const WIDGET_STORAGE_KEY = 'dashboard.widgets';
+
 export default function DashboardPage() {
   const router = useRouter();
-  const { employee: currentUser } = useAccess();
+  const { employee: currentUser, canAny, isSuperAdmin } = useAccess();
+
+  const available = useMemo<DashboardWidgetDef[]>(
+    () => widgetsForAccess(canAny, isSuperAdmin),
+    [canAny, isSuperAdmin]
+  );
+  const orgViewer = useMemo(() => isOrgViewer(canAny, isSuperAdmin), [canAny, isSuperAdmin]);
+
+  const [selected, setSelected] = useState<string[] | null>(null);
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  const [draft, setDraft] = useState<string[]>([]);
+
+  // Load stored widget selection once the employee is known.
+  useEffect(() => {
+    if (!currentUser) return;
+    const saved = storage.get<string[]>(WIDGET_STORAGE_KEY, currentUser.id);
+    const validIds = available.map((w) => w.id);
+    const next = (saved && saved.length > 0 ? saved : defaultWidgetIds(available, orgViewer))
+      .filter((id) => validIds.includes(id));
+    setSelected(next.length > 0 ? next : defaultWidgetIds(available, orgViewer));
+  }, [currentUser, available, orgViewer]);
+
+  const toggleDraft = (id: string, on: boolean) => {
+    setDraft((prev) => (on ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id)));
+  };
+
+  const openCustomize = () => {
+    setDraft(selected || []);
+    setCustomizeOpen(true);
+  };
+
+  const saveCustomize = () => {
+    const validIds = available.map((w) => w.id);
+    const next = draft.filter((id) => validIds.includes(id));
+    setSelected(next);
+    if (currentUser) storage.set(WIDGET_STORAGE_KEY, next, currentUser.id);
+    setCustomizeOpen(false);
+  };
+
+  const show = (id: string) => (selected || []).includes(id);
+  const showOrgStats = show('org_stats');
+
   const [stats, setStats] = useState<DashboardStats>({
     totalEmployees: 0,
     pendingOnboarding: 0,
@@ -40,34 +100,19 @@ export default function DashboardPage() {
   const [statsError, setStatsError] = useState(false);
 
   useEffect(() => {
+    if (!showOrgStats) return;
     async function loadStats() {
       try {
         setStatsError(false);
-
         const today = new Date().toISOString().split('T')[0];
-
         const [empCount, onboardingCount, leaveToday, assetCount, attendanceCount, payrollSum] =
           await Promise.all([
             supabase.from('employees').select('id', { count: 'exact', head: true }),
-            supabase
-              .from('employees')
-              .select('id', { count: 'exact', head: true })
-              .eq('employment_status', 'PENDING_VERIFICATION'),
-            supabase
-              .from('leave_requests')
-              .select('id', { count: 'exact', head: true })
-              .eq('status', 'APPROVED')
-              .lte('start_date', today)
-              .gte('end_date', today),
+            supabase.from('employees').select('id', { count: 'exact', head: true }).eq('employment_status', 'PENDING_VERIFICATION'),
+            supabase.from('leave_requests').select('id', { count: 'exact', head: true }).eq('status', 'APPROVED').lte('start_date', today).gte('end_date', today),
             supabase.from('assets').select('id', { count: 'exact', head: true }),
-            supabase
-              .from('attendance')
-              .select('id', { count: 'exact', head: true })
-              .eq('date', today),
-            supabase
-              .from('payroll_runs')
-              .select('total_net')
-              .in('status', ['APPROVED', 'DISBURSED']),
+            supabase.from('attendance').select('id', { count: 'exact', head: true }).eq('date', today),
+            supabase.from('payroll_runs').select('total_net').in('status', ['APPROVED', 'DISBURSED']),
           ]);
 
         const monthlyPayroll = (payrollSum.data || []).reduce(
@@ -89,7 +134,7 @@ export default function DashboardPage() {
       }
     }
     loadStats();
-  }, []);
+  }, [showOrgStats]);
 
   const summaryCards = [
     { label: 'Total Employees', value: stats.totalEmployees, icon: Users, color: 'primary' as const },
@@ -108,19 +153,36 @@ export default function DashboardPage() {
     info: 'bg-info/10 text-info',
   };
 
+  const personalWidgetIds = ['my_profile', 'my_leave', 'my_attendance', 'my_tasks', 'my_requests'];
+  const hasPersonal = personalWidgetIds.some((id) => show(id));
+
+  const personalWidgetMap: Record<string, React.ReactNode> = {
+    my_profile: <MyProfileWidget />,
+    my_leave: <MyLeaveWidget />,
+    my_attendance: <MyAttendanceWidget />,
+    my_tasks: <MyTasksWidget />,
+    my_requests: <MyRequestsWidget />,
+  };
+
   return (
     <div className="space-y-6 animate-fade-in">
       {currentUser?.employment_status === 'ONBOARDING' && (
         <OnboardingBanner employee={currentUser} onNavigate={(path) => router.push(path)} />
       )}
-      <div>
-        <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Dashboard</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Overview of your organization&apos;s key metrics
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Dashboard</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {orgViewer ? "Overview of your organization's key metrics" : 'Your personal workspace'}
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={openCustomize}>
+          <Settings2 className="mr-2 h-4 w-4" />
+          Customize
+        </Button>
       </div>
 
-      {statsError && (
+      {statsError && showOrgStats && (
         <Card className="border-destructive/30 bg-destructive/5">
           <CardContent className="flex items-center gap-3 p-4">
             <AlertCircle className="h-5 w-5 shrink-0 text-destructive" />
@@ -131,26 +193,66 @@ export default function DashboardPage() {
         </Card>
       )}
 
-      <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-3 lg:grid-cols-6">
-        {summaryCards.map((card) => {
-          const Icon = card.icon;
-          return (
-            <Card key={card.label} className="hover:shadow-md transition-shadow">
-              <CardContent className="p-5">
-                <div className="flex items-center justify-between">
-                  <div className={cn('flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-lg', colorClasses[card.color])}>
-                    <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
+      {showOrgStats && (
+        <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-3 lg:grid-cols-6">
+          {summaryCards.map((card) => {
+            const Icon = card.icon;
+            return (
+              <Card key={card.label} className="hover:shadow-md transition-shadow">
+                <CardContent className="p-5">
+                  <div className="flex items-center justify-between">
+                    <div className={cn('flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-lg', colorClasses[card.color])}>
+                      <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
+                    </div>
                   </div>
-                </div>
-                <p className="mt-3 text-xl sm:text-2xl font-bold">{card.value}</p>
-                <p className="text-xs sm:text-sm text-muted-foreground">{card.label}</p>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
+                  <p className="mt-3 text-xl sm:text-2xl font-bold">{card.value}</p>
+                  <p className="text-xs sm:text-sm text-muted-foreground">{card.label}</p>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
 
-      <DashboardCharts />
+      {hasPersonal && (
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {personalWidgetIds.filter((id) => show(id)).map((id) => (
+            <div key={id}>{personalWidgetMap[id]}</div>
+          ))}
+        </div>
+      )}
+
+      {show('org_charts') && <DashboardCharts />}
+
+      <Dialog open={customizeOpen} onOpenChange={setCustomizeOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Customize Dashboard</DialogTitle></DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-sm text-muted-foreground">
+              Choose which widgets appear on your dashboard.
+            </p>
+            {available.map((w) => (
+              <div key={w.id} className="flex items-start justify-between gap-4 rounded-lg border border-border p-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{w.label}</p>
+                  <p className="text-xs text-muted-foreground">{w.description}</p>
+                </div>
+                <Switch
+                  checked={draft.includes(w.id)}
+                  onCheckedChange={(v) => toggleDraft(w.id, v)}
+                />
+              </div>
+            ))}
+            {available.length === 0 && (
+              <p className="text-sm text-muted-foreground">No widgets available.</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCustomizeOpen(false)}>Cancel</Button>
+            <Button onClick={saveCustomize}>Save</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

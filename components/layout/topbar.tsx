@@ -1,10 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Search, Bell, HelpCircle, Menu, PanelLeftClose, PanelLeftOpen, Sun, Moon } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Search, Bell, HelpCircle, Menu, PanelLeftClose, PanelLeftOpen, Sun, Moon, CheckCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   DropdownMenu,
@@ -15,14 +15,18 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { supabase } from '@/lib/supabase/client';
+import { getEmployeeSession } from '@/lib/supabase/session';
 import { getPreference, setPreference } from '@/lib/storage';
+import { useAccess } from '@/lib/access';
 import { cn } from '@/lib/utils';
 
-interface QueueItem {
+interface NotificationItem {
   id: string;
-  event_key: string | null;
-  subject: string;
-  status: string;
+  title: string;
+  message: string | null;
+  type: string;
+  link: string | null;
+  is_read: boolean;
   created_at: string;
 }
 
@@ -35,7 +39,9 @@ export function Topbar({
   onToggleDesktop: () => void;
   onToggleMobile: () => void;
 }) {
-  const [notifications, setNotifications] = useState<QueueItem[]>([]);
+  const router = useRouter();
+  const { employeeId } = useAccess();
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [isDark, setIsDark] = useState(false);
 
@@ -53,29 +59,79 @@ export function Topbar({
   };
 
   useEffect(() => {
+    if (!employeeId) return;
+    let active = true;
+
     async function loadNotifications() {
       try {
         const { data } = await supabase
-          .from('notification_queue')
-          .select('id, event_key, subject, status, created_at')
+          .from('notifications')
+          .select('id, title, message, type, link, is_read, created_at')
           .order('created_at', { ascending: false })
           .limit(20);
-        const items = (data || []) as QueueItem[];
+        if (!active) return;
+        const items = (data || []) as NotificationItem[];
         setNotifications(items);
-        setUnreadCount(items.filter((n) => n.status === 'PENDING' || n.status === 'FAILED').length);
+        setUnreadCount(items.filter((n) => !n.is_read).length);
       } catch {
-        // silently ignore — notifications are non-critical
+        // notifications are non-critical
       }
     }
-    loadNotifications();
-    const interval = setInterval(loadNotifications, 30000);
-    return () => clearInterval(interval);
-  }, []);
 
-  const statusColor = (status: string) => {
-    if (status === 'SENT') return 'text-success';
-    if (status === 'FAILED') return 'text-destructive';
-    return 'text-warning';
+    loadNotifications();
+    const interval = setInterval(loadNotifications, 60000);
+
+    const token = getEmployeeSession()?.access_token;
+    if (token) supabase.realtime.setAuth(token);
+
+    const channel = supabase
+      .channel(`notifications-${employeeId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'notifications', filter: `employee_id=eq.${employeeId}` },
+        (payload) => {
+          const row = payload.new as NotificationItem;
+          setNotifications((prev) => [row, ...prev].slice(0, 20));
+          setUnreadCount((c) => c + 1);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+      supabase.removeChannel(channel);
+    };
+  }, [employeeId]);
+
+  const markAllRead = async () => {
+    try {
+      await supabase.rpc('mark_all_notifications_read');
+      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+      setUnreadCount(0);
+    } catch {
+      // ignore
+    }
+  };
+
+  const openNotification = async (n: NotificationItem) => {
+    if (!n.is_read) {
+      try {
+        await supabase.rpc('mark_notification_read', { p_id: n.id });
+      } catch {
+        // ignore
+      }
+      setNotifications((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x)));
+      setUnreadCount((c) => Math.max(0, c - 1));
+    }
+    if (n.link) router.push(n.link);
+  };
+
+  const typeColor = (type: string) => {
+    if (type === 'SUCCESS') return 'text-success';
+    if (type === 'WARNING') return 'text-warning';
+    if (type === 'ERROR') return 'text-destructive';
+    return 'text-primary';
   };
 
   return (
@@ -97,11 +153,7 @@ export function Topbar({
       </div>
 
       <div className="ml-auto flex items-center gap-1">
-        <Button variant="ghost" size="icon" className="sm:hidden" aria-label="Search">
-          <Search className="h-5 w-5" />
-        </Button>
-
-        <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle dark mode">
+        <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
           {isDark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
         </Button>
 
@@ -110,7 +162,7 @@ export function Topbar({
             <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
               <Bell className="h-5 w-5" />
               {unreadCount > 0 && (
-                <span className="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-destructive-foreground">
+                <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold text-destructive-foreground">
                   {unreadCount > 9 ? '9+' : unreadCount}
                 </span>
               )}
@@ -119,7 +171,14 @@ export function Topbar({
           <DropdownMenuContent align="end" className="w-80">
             <DropdownMenuLabel className="flex items-center justify-between">
               <span>Notifications</span>
-              {unreadCount > 0 && <Badge variant="secondary">{unreadCount} pending</Badge>}
+              {unreadCount > 0 && (
+                <button
+                  className="text-xs font-medium text-primary hover:underline"
+                  onClick={(e) => { e.preventDefault(); markAllRead(); }}
+                >
+                  Mark all read
+                </button>
+              )}
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <ScrollArea className="max-h-80">
@@ -129,14 +188,22 @@ export function Topbar({
                 </div>
               ) : (
                 notifications.map((n) => (
-                  <DropdownMenuItem key={n.id} className="flex-col items-start gap-0.5 py-2">
-                    <div className="flex w-full items-center justify-between gap-2">
-                      <span className="text-sm font-medium truncate">{n.subject}</span>
-                      <span className={cn('text-xs font-semibold shrink-0', statusColor(n.status))}>
-                        {n.status}
+                  <DropdownMenuItem
+                    key={n.id}
+                    className="flex-col items-start gap-0.5 py-2 cursor-pointer"
+                    onClick={() => openNotification(n)}
+                  >
+                    <div className="flex w-full items-center gap-2">
+                      {!n.is_read && <span className="h-2 w-2 shrink-0 rounded-full bg-primary" />}
+                      <span className={cn('flex-1 truncate text-sm', n.is_read ? 'font-normal' : 'font-semibold')}>
+                        {n.title}
                       </span>
+                      <span className={cn('shrink-0 text-xs font-semibold', typeColor(n.type))}>•</span>
                     </div>
-                    <span className="text-xs text-muted-foreground">
+                    {n.message && (
+                      <span className="line-clamp-2 pl-4 text-xs text-muted-foreground">{n.message}</span>
+                    )}
+                    <span className="pl-4 text-[11px] text-muted-foreground">
                       {new Date(n.created_at).toLocaleString()}
                     </span>
                   </DropdownMenuItem>
