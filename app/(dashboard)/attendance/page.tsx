@@ -22,6 +22,8 @@ interface AttendanceRecord {
   status: string;
   work_hours: number | null;
   overtime_hours: number;
+  source?: string | null;
+  clock_in_zone?: string | null;
 }
 
 interface EmployeeRef {
@@ -115,59 +117,50 @@ export default function AttendancePage() {
   const canClockOut = !clockOutOpensAt || nowTick >= clockOutOpensAt.getTime();
   const fmtTime = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  const handleClockIn = async () => {
+  const getPosition = () =>
+    new Promise<GeolocationPosition>((resolve, reject) => {
+      if (!navigator.geolocation) {
+        reject(new Error('Geolocation is not supported by this browser'));
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(resolve, reject, {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 0,
+      });
+    });
+
+  const punch = async (action: 'CLOCK_IN' | 'CLOCK_OUT') => {
     if (!currentUser) return;
     setClocking(true);
     try {
-      const now = new Date().toISOString();
-      const { data, error } = await supabase
-        .from('attendance')
-        .upsert(
-          {
-            employee_id: currentUser.id,
-            date: today,
-            clock_in: now,
-            status: 'PRESENT',
-          },
-          { onConflict: 'employee_id,date' }
-        )
-        .select()
-        .single();
+      const pos = await getPosition();
+      const { latitude, longitude, accuracy } = pos.coords;
+      const { data, error } = await supabase.rpc('clock_attendance', {
+        p_action: action,
+        p_lat: latitude,
+        p_lng: longitude,
+        p_accuracy: accuracy,
+        p_source: 'WEB',
+      });
       if (error) throw error;
-      setTodayRecord(data as unknown as AttendanceRecord);
-      toast.success('Clocked in successfully');
+      const res = data as { ok: boolean; code?: string; message?: string; zone?: string | null };
+      if (!res?.ok) throw new Error(res?.message || 'Unable to record attendance');
+      toast.success(
+        action === 'CLOCK_IN'
+          ? `Clocked in${res.zone ? ` at ${res.zone}` : ''}`
+          : 'Clocked out successfully'
+      );
       load();
     } catch (err) {
-      toast.error('Failed to clock in: ' + (err as Error).message);
+      toast.error((err as Error).message);
     } finally {
       setClocking(false);
     }
   };
 
-  const handleClockOut = async () => {
-    if (!todayRecord) return;
-    setClocking(true);
-    try {
-      const now = new Date().toISOString();
-      const clockIn = new Date(todayRecord.clock_in!);
-      const hours = (new Date(now).getTime() - clockIn.getTime()) / (1000 * 60 * 60);
-      const { error } = await supabase
-        .from('attendance')
-        .update({
-          clock_out: now,
-          work_hours: Math.round(hours * 100) / 100,
-        })
-        .eq('id', todayRecord.id);
-      if (error) throw error;
-      setTodayRecord({ ...todayRecord, clock_out: now, work_hours: Math.round(hours * 100) / 100 });
-      toast.success('Clocked out successfully');
-      load();
-    } catch (err) {
-      toast.error('Failed to clock out: ' + (err as Error).message);
-    } finally {
-      setClocking(false);
-    }
-  };
+  const handleClockIn = () => punch('CLOCK_IN');
+  const handleClockOut = () => punch('CLOCK_OUT');
 
   const openNewEntry = () => {
     setEditing(null);
@@ -209,6 +202,7 @@ export default function AttendancePage() {
         date: entryForm.date,
         status: entryForm.status,
       };
+      if (!editing) payload.source = 'MANUAL';
       if (entryForm.clock_in) payload.clock_in = new Date(entryForm.clock_in).toISOString();
       if (entryForm.clock_out) payload.clock_out = new Date(entryForm.clock_out).toISOString();
       if (entryForm.work_hours) payload.work_hours = parseFloat(entryForm.work_hours);
@@ -277,6 +271,11 @@ export default function AttendancePage() {
     {
       key: 'status', label: 'Status',
       render: (r) => <Badge variant="outline" className={statusColors[r.status] || ''}>{r.status}</Badge>,
+    },
+    {
+      key: 'source', label: 'Source',
+      render: (r) => <Badge variant="outline" className="text-xs">{r.source || 'WEB'}</Badge>,
+      searchable: false,
     },
   ];
 

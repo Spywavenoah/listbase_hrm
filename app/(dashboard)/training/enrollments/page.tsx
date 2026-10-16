@@ -2,13 +2,14 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { ModuleListPage, type SummaryCard, type Column } from '@/components/shared/module-list-page';
-import { UserPlus, CheckCircle, Clock, GraduationCap } from 'lucide-react';
+import { UserPlus, CheckCircle, Clock, GraduationCap, Play, Award } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { VideoPlayer } from '@/components/training/video-player';
 import { toast } from 'sonner';
 
 interface Enrollment {
@@ -19,6 +20,20 @@ interface Enrollment {
   enrolled_at: string;
   completed_at: string | null;
   progress: number;
+  certificate_id: string | null;
+  certificate_expires_at: string | null;
+  certificate_pdf_url: string | null;
+  cycle: number;
+}
+
+type RenewalBadge = { label: string; cls: string };
+
+function renewalBadge(expiresAt: string): RenewalBadge {
+  const days = Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 86400000);
+  if (!Number.isFinite(days)) return { label: '—', cls: 'bg-muted text-muted-foreground' };
+  if (days <= 0) return { label: 'Renewal due', cls: 'bg-destructive/10 text-destructive' };
+  if (days <= 30) return { label: `Renews in ${days}d`, cls: 'bg-warning/10 text-warning' };
+  return { label: `Renews in ${days}d`, cls: 'bg-info/10 text-info' };
 }
 
 export default function EnrollmentsPage() {
@@ -28,6 +43,7 @@ export default function EnrollmentsPage() {
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({ employee_id: '', course_id: '' });
+  const [watchTarget, setWatchTarget] = useState<Enrollment | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -105,6 +121,35 @@ export default function EnrollmentsPage() {
       key: 'status', label: 'Status',
       render: (e) => <Badge variant="outline" className={statusColors[e.status] || ''}>{e.status}</Badge>,
     },
+    {
+      key: 'certificate_id', label: 'Certificate',
+      searchText: (e) => [e.certificate_id || ''],
+      render: (e) => e.certificate_id
+        ? (
+          <span className="inline-flex items-center gap-1 text-xs">
+            <Award className="h-3.5 w-3.5 text-success" />
+            <a
+              href={e.certificate_pdf_url || '#'}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-primary hover:underline"
+              onClick={(ev) => { if (!e.certificate_pdf_url) ev.stopPropagation(); }}
+            >
+              {e.certificate_id}
+            </a>
+          </span>
+        )
+        : <span className="text-muted-foreground">—</span>,
+    },
+    {
+      key: 'certificate_expires_at', label: 'Renewal',
+      searchText: (e) => [e.certificate_expires_at || ''],
+      render: (e) => {
+        if (!e.certificate_expires_at) return <span className="text-muted-foreground">—</span>;
+        const r = renewalBadge(e.certificate_expires_at);
+        return <Badge variant="outline" className={r.cls}>{r.label}</Badge>;
+      },
+    },
   ];
 
   return (
@@ -119,22 +164,15 @@ export default function EnrollmentsPage() {
         createLabel="Enroll Employee"
         onCreate={() => setCreateOpen(true)}
         rowActions={(e) => (
-          e.status !== 'COMPLETED' ? (
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 text-success"
-              onClick={async () => {
-                await supabase.from('training_enrollments')
-                  .update({ status: 'COMPLETED', progress: 100, completed_at: new Date().toISOString() })
-                  .eq('id', e.id);
-                toast.success('Marked complete');
-                load();
-              }}
-            >
-              Complete
-            </Button>
-          ) : null
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-primary"
+            onClick={() => setWatchTarget(e)}
+          >
+            <Play className="mr-1 h-3 w-3" />
+            {e.status === 'COMPLETED' ? 'View' : 'Watch'}
+          </Button>
         )}
       />
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -164,6 +202,23 @@ export default function EnrollmentsPage() {
             <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
             <Button onClick={handleCreate} disabled={!form.employee_id || !form.course_id}>Enroll</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!watchTarget} onOpenChange={(o) => { if (!o) setWatchTarget(null); }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>
+              {watchTarget ? courseTitle(watchTarget.course_id) : 'Training lesson'}
+            </DialogTitle>
+          </DialogHeader>
+          {watchTarget && (
+            <VideoPlayer
+              key={watchTarget.id}
+              enrollmentId={watchTarget.id}
+              onCompleted={() => { load(); }}
+            />
+          )}
         </DialogContent>
       </Dialog>
     </>

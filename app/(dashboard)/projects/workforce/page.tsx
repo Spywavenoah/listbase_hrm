@@ -14,7 +14,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
 import { useAccess } from '@/lib/access';
-import { Users, UserPlus, Repeat, CalendarClock, CheckCircle } from 'lucide-react';
+import { Users, UserPlus, Repeat, CalendarClock, CheckCircle, Plus, Trash2, Layers } from 'lucide-react';
 import {
   WORKFORCE_SOURCES,
   labelFor,
@@ -22,25 +22,48 @@ import {
   fmtDate,
   inclusiveDays,
   todayIso,
-  addDaysIso,
   type Project,
   type ProjectWorkforce,
-  type ProjectShuffle,
+  type WorkforceBatch,
+  type ProjectShuffleRequest,
+  type ProjectShuffleItem,
   type EmployeeLite,
 } from '@/lib/projects';
 
 type WorkforceRow = ProjectWorkforce & { employee?: EmployeeLite };
-type ShuffleRow = ProjectShuffle & { replaced?: EmployeeLite; replacement?: EmployeeLite };
+type ShuffleRequestRow = ProjectShuffleRequest & { items: (ProjectShuffleItem & { replaced?: EmployeeLite; replacement?: EmployeeLite })[] };
+
+interface ShuffleLine {
+  key: string;
+  replacedWorkforceId: string;
+  newEmployeeId: string;
+  replaceEnd: string;
+  newStart: string;
+  role: string;
+  notes: string;
+}
+
+const newLine = (): ShuffleLine => ({
+  key: Math.random().toString(36).slice(2),
+  replacedWorkforceId: '',
+  newEmployeeId: '',
+  replaceEnd: todayIso(),
+  newStart: todayIso(),
+  role: '',
+  notes: '',
+});
 
 function WorkforceContent() {
   const params = useSearchParams();
-  const { can } = useAccess();
+  const { can, employee } = useAccess();
   const canManage = can('projects.manage') || can('admin.settings');
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [employees, setEmployees] = useState<EmployeeLite[]>([]);
   const [workforce, setWorkforce] = useState<ProjectWorkforce[]>([]);
-  const [shuffles, setShuffles] = useState<ProjectShuffle[]>([]);
+  const [batches, setBatches] = useState<WorkforceBatch[]>([]);
+  const [requests, setRequests] = useState<ProjectShuffleRequest[]>([]);
+  const [items, setItems] = useState<ProjectShuffleItem[]>([]);
   const [selected, setSelected] = useState<string>('');
   const [loading, setLoading] = useState(true);
 
@@ -49,14 +72,12 @@ function WorkforceContent() {
   const [appendIds, setAppendIds] = useState<string[]>([]);
   const [appendRole, setAppendRole] = useState('');
   const [appendStart, setAppendStart] = useState(todayIso());
+  const [appendNotes, setAppendNotes] = useState('');
 
   const [shuffleOpen, setShuffleOpen] = useState(false);
-  const [shuffleReplaced, setShuffleReplaced] = useState<WorkforceRow | null>(null);
-  const [shuffleEnd, setShuffleEnd] = useState(todayIso());
-  const [shuffleNewId, setShuffleNewId] = useState('');
-  const [shuffleStart, setShuffleStart] = useState(todayIso());
-  const [shuffleRole, setShuffleRole] = useState('');
   const [shuffleNotes, setShuffleNotes] = useState('');
+  const [shuffleLines, setShuffleLines] = useState<ShuffleLine[]>([newLine()]);
+  const [shuffleSaving, setShuffleSaving] = useState(false);
 
   const [editRow, setEditRow] = useState<WorkforceRow | null>(null);
   const [editRole, setEditRole] = useState('');
@@ -77,13 +98,25 @@ function WorkforceContent() {
   }, [params]);
 
   const loadRoster = useCallback(async (projectId: string) => {
-    if (!projectId) { setWorkforce([]); setShuffles([]); return; }
-    const [w, s] = await Promise.all([
+    if (!projectId) { setWorkforce([]); setBatches([]); setRequests([]); setItems([]); return; }
+    const [w, b, req] = await Promise.all([
       supabase.from('project_workforce').select('*').eq('project_id', projectId).order('start_date', { ascending: false }),
-      supabase.from('project_shuffles').select('*').eq('project_id', projectId).order('created_at', { ascending: false }),
+      supabase.from('project_workforce_batches').select('*').eq('project_id', projectId).order('created_at', { ascending: false }),
+      supabase.from('project_shuffle_requests').select('*').eq('project_id', projectId).order('created_at', { ascending: false }),
     ]);
+    const reqList = (req.data || []) as unknown as ProjectShuffleRequest[];
     setWorkforce((w.data || []) as unknown as ProjectWorkforce[]);
-    setShuffles((s.data || []) as unknown as ProjectShuffle[]);
+    setBatches((b.data || []) as unknown as WorkforceBatch[]);
+    setRequests(reqList);
+    if (reqList.length) {
+      const { data: itemData } = await supabase
+        .from('project_shuffle_items')
+        .select('*')
+        .in('request_id', reqList.map((r) => r.id));
+      setItems((itemData || []) as unknown as ProjectShuffleItem[]);
+    } else {
+      setItems([]);
+    }
   }, []);
 
   useEffect(() => { loadBase(); }, [loadBase]);
@@ -102,15 +135,19 @@ function WorkforceContent() {
     [workforce, employeeMap]
   );
 
-  const shuffleRows: ShuffleRow[] = useMemo(
-    () => shuffles.map((s) => ({
-      ...s,
-      replaced: employeeMap[s.replaced_employee_id],
-      replacement: employeeMap[s.new_employee_id],
-    })),
-    [shuffles, employeeMap]
-  );
+  const requestRows: ShuffleRequestRow[] = useMemo(() => {
+    const byReq: Record<string, (ProjectShuffleItem & { replaced?: EmployeeLite; replacement?: EmployeeLite })[]> = {};
+    for (const it of items) {
+      (byReq[it.request_id] = byReq[it.request_id] || []).push({
+        ...it,
+        replaced: employeeMap[it.replaced_employee_id],
+        replacement: employeeMap[it.new_employee_id],
+      });
+    }
+    return requests.map((r) => ({ ...r, items: byReq[r.id] || [] }));
+  }, [requests, items, employeeMap]);
 
+  const activeRows = useMemo(() => rows.filter((r) => !r.end_date), [rows]);
   const activeEmployeeIds = useMemo(
     () => new Set(workforce.filter((w) => !w.end_date).map((w) => w.employee_id)),
     [workforce]
@@ -118,13 +155,26 @@ function WorkforceContent() {
 
   const openAppend = () => {
     if (!selected) { toast.error('Select a project first'); return; }
-    setAppendIds([]); setAppendRole(''); setAppendStart(todayIso()); setAppendSearch(''); setAppendOpen(true);
+    setAppendIds([]); setAppendRole(''); setAppendStart(todayIso()); setAppendSearch(''); setAppendNotes(''); setAppendOpen(true);
   };
 
   const saveAppend = async () => {
     if (!appendIds.length) { toast.error('Select at least one employee'); return; }
     if (!appendStart) { toast.error('Start date is required'); return; }
     try {
+      const { data: batch, error: bErr } = await supabase
+        .from('project_workforce_batches')
+        .insert({
+          project_id: selected,
+          batch_type: 'APPEND',
+          notes: appendNotes.trim() || null,
+          effective_date: appendStart,
+          created_by: employee?.id || null,
+        })
+        .select('id')
+        .single();
+      if (bErr) throw bErr;
+      const batchId = (batch as { id: string }).id;
       const payload = appendIds.map((employee_id) => ({
         project_id: selected,
         employee_id,
@@ -132,10 +182,11 @@ function WorkforceContent() {
         start_date: appendStart,
         end_date: null,
         source: 'APPEND',
+        batch_id: batchId,
       }));
       const { error } = await supabase.from('project_workforce').insert(payload);
       if (error) throw error;
-      toast.success(`${appendIds.length} employee${appendIds.length > 1 ? 's' : ''} appended`);
+      toast.success(`${appendIds.length} employee${appendIds.length > 1 ? 's' : ''} appended as one batch`);
       setAppendOpen(false);
       loadRoster(selected);
     } catch (err) {
@@ -143,63 +194,111 @@ function WorkforceContent() {
     }
   };
 
-  const openShuffle = (row: WorkforceRow) => {
-    setShuffleReplaced(row);
-    setShuffleEnd(row.end_date || todayIso());
-    setShuffleNewId('');
-    setShuffleStart(addDaysIso(row.end_date || todayIso(), 1));
-    setShuffleRole(row.role || '');
+  const openShuffle = () => {
+    if (!selected) { toast.error('Select a project first'); return; }
+    if (!activeRows.length) { toast.error('No active crew to shuffle'); return; }
     setShuffleNotes('');
+    setShuffleLines([newLine()]);
     setShuffleOpen(true);
   };
 
+  const updateLine = (key: string, patch: Partial<ShuffleLine>) => {
+    setShuffleLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  };
+
   const saveShuffle = async () => {
-    if (!shuffleReplaced) return;
-    if (!shuffleNewId) { toast.error('Select the replacement employee'); return; }
-    if (shuffleNewId === shuffleReplaced.employee_id) { toast.error('Replacement must differ from the replaced employee'); return; }
-    if (activeEmployeeIds.has(shuffleNewId)) { toast.error('Replacement is already deployed on this project'); return; }
-    if (shuffleEnd < shuffleReplaced.start_date) { toast.error('Replacement end date is before the original start date'); return; }
-    if (shuffleStart < shuffleEnd) { toast.error('New start date must be on or after the replacement end date'); return; }
+    const clean = shuffleLines.filter((l) => l.replacedWorkforceId || l.newEmployeeId);
+    if (!clean.length) { toast.error('Add at least one shuffle line'); return; }
+    const chosenReplaced = new Set<string>();
+    const chosenNew = new Set<string>();
+    for (const l of clean) {
+      const replacedRow = rows.find((r) => r.id === l.replacedWorkforceId);
+      if (!replacedRow) { toast.error('Select the employee being replaced on every line'); return; }
+      if (!l.newEmployeeId) { toast.error('Select a replacement on every line'); return; }
+      if (l.newEmployeeId === replacedRow.employee_id) { toast.error('Replacement must differ from the replaced employee'); return; }
+      if (activeEmployeeIds.has(l.newEmployeeId)) { toast.error(`${employeeName(employeeMap[l.newEmployeeId])} is already deployed on this project`); return; }
+      if (chosenReplaced.has(l.replacedWorkforceId)) { toast.error('An employee is replaced more than once'); return; }
+      if (chosenNew.has(l.newEmployeeId)) { toast.error('A replacement is used more than once'); return; }
+      if (l.replaceEnd < replacedRow.start_date) { toast.error('Replacement end date is before the original start date'); return; }
+      if (l.newStart < l.replaceEnd) { toast.error('New start date must be on or after the replacement end date'); return; }
+      chosenReplaced.add(l.replacedWorkforceId);
+      chosenNew.add(l.newEmployeeId);
+    }
+    setShuffleSaving(true);
     try {
-      const { data: newRow, error: insErr } = await supabase
-        .from('project_workforce')
+      const effectiveDate = clean.map((l) => l.newStart).sort()[0];
+      const { data: batch, error: bErr } = await supabase
+        .from('project_workforce_batches')
         .insert({
           project_id: selected,
-          employee_id: shuffleNewId,
-          role: shuffleRole.trim() || shuffleReplaced.role || null,
-          start_date: shuffleStart,
-          end_date: null,
-          source: 'SHUFFLE',
+          batch_type: 'SHUFFLE',
+          notes: shuffleNotes.trim() || null,
+          effective_date: effectiveDate,
+          created_by: employee?.id || null,
         })
         .select('id')
         .single();
-      if (insErr) throw insErr;
+      if (bErr) throw bErr;
+      const batchId = (batch as { id: string }).id;
 
-      const { error: updErr } = await supabase
-        .from('project_workforce')
-        .update({ end_date: shuffleEnd, source: 'SHUFFLE' })
-        .eq('id', shuffleReplaced.id);
-      if (updErr) throw updErr;
+      const { data: req, error: rErr } = await supabase
+        .from('project_shuffle_requests')
+        .insert({
+          project_id: selected,
+          batch_id: batchId,
+          notes: shuffleNotes.trim() || null,
+          effective_date: effectiveDate,
+          created_by: employee?.id || null,
+        })
+        .select('id')
+        .single();
+      if (rErr) throw rErr;
+      const requestId = (req as { id: string }).id;
 
-      const { error: audErr } = await supabase.from('project_shuffles').insert({
-        project_id: selected,
-        replaced_workforce_id: shuffleReplaced.id,
-        replaced_employee_id: shuffleReplaced.employee_id,
-        replace_start_date: shuffleReplaced.start_date,
-        replace_end_date: shuffleEnd,
-        new_employee_id: shuffleNewId,
-        new_workforce_id: (newRow as { id: string } | null)?.id ?? null,
-        new_start_date: shuffleStart,
-        notes: shuffleNotes.trim() || null,
-      });
-      if (audErr) throw audErr;
+      for (const l of clean) {
+        const replacedRow = rows.find((r) => r.id === l.replacedWorkforceId)!;
+        const { data: newRow, error: insErr } = await supabase
+          .from('project_workforce')
+          .insert({
+            project_id: selected,
+            employee_id: l.newEmployeeId,
+            role: l.role.trim() || replacedRow.role || null,
+            start_date: l.newStart,
+            end_date: null,
+            source: 'SHUFFLE',
+            batch_id: batchId,
+          })
+          .select('id')
+          .single();
+        if (insErr) throw insErr;
 
-      toast.success('Workforce shuffled');
+        const { error: updErr } = await supabase
+          .from('project_workforce')
+          .update({ end_date: l.replaceEnd, source: 'SHUFFLE' })
+          .eq('id', replacedRow.id);
+        if (updErr) throw updErr;
+
+        const { error: itemErr } = await supabase.from('project_shuffle_items').insert({
+          request_id: requestId,
+          replaced_workforce_id: replacedRow.id,
+          replaced_employee_id: replacedRow.employee_id,
+          replace_start_date: replacedRow.start_date,
+          replace_end_date: l.replaceEnd,
+          new_employee_id: l.newEmployeeId,
+          new_workforce_id: (newRow as { id: string } | null)?.id ?? null,
+          new_start_date: l.newStart,
+          notes: l.notes.trim() || null,
+        });
+        if (itemErr) throw itemErr;
+      }
+
+      toast.success(`Shuffle request recorded for ${clean.length} employee${clean.length > 1 ? 's' : ''}`);
       setShuffleOpen(false);
-      setShuffleReplaced(null);
       loadRoster(selected);
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
+    } finally {
+      setShuffleSaving(false);
     }
   };
 
@@ -244,11 +343,6 @@ function WorkforceContent() {
     return employees.filter((e) => !q || employeeName(e).toLowerCase().includes(q));
   }, [employees, appendSearch]);
 
-  const replacementOptions = useMemo(
-    () => employees.filter((e) => !activeEmployeeIds.has(e.id) && e.id !== shuffleReplaced?.employee_id),
-    [employees, activeEmployeeIds, shuffleReplaced]
-  );
-
   const ongoing = rows.filter((r) => !r.end_date).length;
   const totalManDays = rows.reduce((sum, r) => sum + inclusiveDays(r.start_date, r.end_date), 0);
 
@@ -277,14 +371,21 @@ function WorkforceContent() {
   ];
 
   const toolbar = (
-    <Select value={selected} onValueChange={setSelected}>
-      <SelectTrigger className="w-56"><SelectValue placeholder="Select project" /></SelectTrigger>
-      <SelectContent>
-        {projects.map((p) => (
-          <SelectItem key={p.id} value={p.id}>{p.code ? `${p.code} · ` : ''}{p.name}</SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <div className="flex items-center gap-2">
+      <Select value={selected} onValueChange={setSelected}>
+        <SelectTrigger className="w-56"><SelectValue placeholder="Select project" /></SelectTrigger>
+        <SelectContent>
+          {projects.map((p) => (
+            <SelectItem key={p.id} value={p.id}>{p.code ? `${p.code} · ` : ''}{p.name}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {canManage && selected && (
+        <Button variant="outline" size="sm" onClick={openShuffle} disabled={!activeRows.length}>
+          <Repeat className="mr-1.5 h-4 w-4" /> Shuffle
+        </Button>
+      )}
+    </div>
   );
 
   return (
@@ -302,54 +403,95 @@ function WorkforceContent() {
         toolbarActions={toolbar}
         onEdit={canManage ? openEdit : undefined}
         onDelete={canManage ? removeRow : undefined}
-        rowActions={canManage ? (r) => (
-          (!r.end_date) ? (
-            <Button variant="ghost" size="sm" className="h-8" onClick={() => openShuffle(r)}>
-              <Repeat className="mr-1 h-4 w-4" /> Shuffle
-            </Button>
-          ) : null
-        ) : undefined}
         statusValue={(r) => (r.end_date ? 'Completed' : 'Ongoing')}
         emptyMessage={selected ? 'No crew deployed yet.' : 'No projects available.'}
         emptyDescription={selected ? 'Append employees to build the crew, or shuffle to replace someone.' : 'Create a project first.'}
       />
 
-      {selected && (
+      {selected && requestRows.length > 0 && (
         <Card className="mt-6">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <Repeat className="h-4 w-4" /> Shuffle history
+              <Repeat className="h-4 w-4" /> Shuffle requests
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {requestRows.map((req) => (
+              <div key={req.id} className="rounded-lg border border-border">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-4 py-2 text-sm">
+                  <span className="font-medium">
+                    Request · {req.items.length} employee{req.items.length === 1 ? '' : 's'}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Effective {fmtDate(req.effective_date)} · recorded {fmtDate(req.created_at)}
+                  </span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[720px] text-sm">
+                    <thead>
+                      <tr className="border-b border-border text-left text-muted-foreground">
+                        <th className="px-4 py-2 font-medium">Replaced</th>
+                        <th className="px-4 py-2 font-medium">Replacement window</th>
+                        <th className="px-4 py-2 font-medium">Replacement</th>
+                        <th className="px-4 py-2 font-medium">New window</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {req.items.map((it) => (
+                        <tr key={it.id} className="border-b border-border/60">
+                          <td className="px-4 py-2">{employeeName(it.replaced)}</td>
+                          <td className="px-4 py-2 text-muted-foreground">{fmtDate(it.replace_start_date)} → {fmtDate(it.replace_end_date)}</td>
+                          <td className="px-4 py-2 font-medium">{employeeName(it.replacement)}</td>
+                          <td className="px-4 py-2 text-muted-foreground">{fmtDate(it.new_start_date)} → Ongoing</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {req.notes && <p className="px-4 py-2 text-xs text-muted-foreground">{req.notes}</p>}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {selected && batches.length > 0 && (
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Layers className="h-4 w-4" /> Workforce batches
             </CardTitle>
           </CardHeader>
           <CardContent className="p-0">
-            {shuffleRows.length === 0 ? (
-              <p className="px-6 pb-6 text-sm text-muted-foreground">No shuffles recorded for this project.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[720px] text-sm">
-                  <thead>
-                    <tr className="border-b border-border text-left text-muted-foreground">
-                      <th className="px-4 py-2 font-medium">Replaced</th>
-                      <th className="px-4 py-2 font-medium">Replacement window</th>
-                      <th className="px-4 py-2 font-medium">Replacement</th>
-                      <th className="px-4 py-2 font-medium">New window</th>
-                      <th className="px-4 py-2 font-medium">Recorded</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {shuffleRows.map((s) => (
-                      <tr key={s.id} className="border-b border-border/60">
-                        <td className="px-4 py-2">{employeeName(s.replaced)}</td>
-                        <td className="px-4 py-2 text-muted-foreground">{fmtDate(s.replace_start_date)} → {fmtDate(s.replace_end_date)}</td>
-                        <td className="px-4 py-2 font-medium">{employeeName(s.replacement)}</td>
-                        <td className="px-4 py-2 text-muted-foreground">{fmtDate(s.new_start_date)} → Ongoing</td>
-                        <td className="px-4 py-2 text-muted-foreground">{fmtDate(s.created_at)}</td>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[640px] text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left text-muted-foreground">
+                    <th className="px-4 py-2 font-medium">Type</th>
+                    <th className="px-4 py-2 font-medium">Effective</th>
+                    <th className="px-4 py-2 font-medium">Employees</th>
+                    <th className="px-4 py-2 font-medium">Notes</th>
+                    <th className="px-4 py-2 font-medium">Recorded</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {batches.map((b) => {
+                    const count = workforce.filter((w) => w.batch_id === b.id).length;
+                    return (
+                      <tr key={b.id} className="border-b border-border/60">
+                        <td className="px-4 py-2">
+                          <Badge variant="outline" className="text-xs">{labelFor(WORKFORCE_SOURCES, b.batch_type)}</Badge>
+                        </td>
+                        <td className="px-4 py-2 text-muted-foreground">{fmtDate(b.effective_date)}</td>
+                        <td className="px-4 py-2">{count}</td>
+                        <td className="px-4 py-2 text-muted-foreground">{b.notes || '—'}</td>
+                        <td className="px-4 py-2 text-muted-foreground">{fmtDate(b.created_at)}</td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -391,6 +533,10 @@ function WorkforceContent() {
                 })}
               </div>
             </div>
+            <div className="space-y-1.5">
+              <Label>Batch notes</Label>
+              <Textarea rows={2} value={appendNotes} onChange={(e) => setAppendNotes(e.target.value)} placeholder="Where this batch of crew came from" />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAppendOpen(false)}>Cancel</Button>
@@ -400,50 +546,86 @@ function WorkforceContent() {
       </Dialog>
 
       <Dialog open={shuffleOpen} onOpenChange={setShuffleOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto">
-          <DialogHeader><DialogTitle>Shuffle Workforce</DialogTitle></DialogHeader>
+        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
+          <DialogHeader><DialogTitle>New Shuffle Request</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
-            <div className="rounded-md bg-muted/50 p-3 text-sm">
-              <span className="text-muted-foreground">Replacing </span>
-              <span className="font-medium">{employeeName(shuffleReplaced?.employee)}</span>
-              <span className="text-muted-foreground"> (deployed {fmtDate(shuffleReplaced?.start_date)})</span>
-            </div>
+            <p className="text-sm text-muted-foreground">
+              Record one request that can replace several crew members at once. Each line ties a leaving
+              deployment to its replacement and dates.
+            </p>
+            {shuffleLines.map((l, idx) => {
+              const replacedRow = rows.find((r) => r.id === l.replacedWorkforceId) || null;
+              const usedReplaced = new Set(shuffleLines.filter((x) => x.key !== l.key).map((x) => x.replacedWorkforceId).filter(Boolean));
+              const usedNew = new Set(shuffleLines.filter((x) => x.key !== l.key).map((x) => x.newEmployeeId).filter(Boolean));
+              const replacementOptions = employees.filter(
+                (e) => !activeEmployeeIds.has(e.id) && e.id !== replacedRow?.employee_id && !usedNew.has(e.id)
+              );
+              return (
+                <div key={l.key} className="space-y-3 rounded-lg border border-border p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium">Line {idx + 1}</span>
+                    <Button type="button" variant="ghost" size="icon" onClick={() => setShuffleLines((prev) => prev.filter((x) => x.key !== l.key))} disabled={shuffleLines.length === 1}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label>Employee being replaced *</Label>
+                      <Select value={l.replacedWorkforceId || undefined} onValueChange={(v) => updateLine(l.key, { replacedWorkforceId: v })}>
+                        <SelectTrigger><SelectValue placeholder="Select active crew" /></SelectTrigger>
+                        <SelectContent>
+                          {activeRows.filter((r) => !usedReplaced.has(r.id)).map((r) => (
+                            <SelectItem key={r.id} value={r.id}>{employeeName(r.employee)}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Replacement employee *</Label>
+                      <Select value={l.newEmployeeId || undefined} onValueChange={(v) => updateLine(l.key, { newEmployeeId: v })}>
+                        <SelectTrigger><SelectValue placeholder="Select replacement" /></SelectTrigger>
+                        <SelectContent>
+                          {replacementOptions.length === 0 ? (
+                            <SelectItem value="__none__" disabled>No available employees</SelectItem>
+                          ) : replacementOptions.map((e) => (
+                            <SelectItem key={e.id} value={e.id}>{employeeName(e)}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <div className="space-y-1.5">
+                      <Label>Replacement end date *</Label>
+                      <Input type="date" value={l.replaceEnd} min={replacedRow?.start_date} onChange={(e) => updateLine(l.key, { replaceEnd: e.target.value })} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>New start date *</Label>
+                      <Input type="date" value={l.newStart} min={l.replaceEnd} onChange={(e) => updateLine(l.key, { newStart: e.target.value })} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Role</Label>
+                      <Input value={l.role} onChange={(e) => updateLine(l.key, { role: e.target.value })} placeholder="Defaults to replaced role" />
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Line notes</Label>
+                    <Input value={l.notes} onChange={(e) => updateLine(l.key, { notes: e.target.value })} />
+                  </div>
+                </div>
+              );
+            })}
+            <Button type="button" variant="outline" size="sm" onClick={() => setShuffleLines((prev) => [...prev, newLine()])}>
+              <Plus className="mr-1.5 h-4 w-4" /> Add line
+            </Button>
             <div className="space-y-1.5">
-              <Label>Replacement end date *</Label>
-              <Input type="date" value={shuffleEnd} min={shuffleReplaced?.start_date} onChange={(e) => setShuffleEnd(e.target.value)} />
-              <p className="text-xs text-muted-foreground">Last day the replaced employee is counted on this project.</p>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Replacement employee *</Label>
-              <Select value={shuffleNewId} onValueChange={setShuffleNewId}>
-                <SelectTrigger><SelectValue placeholder="Select employee" /></SelectTrigger>
-                <SelectContent>
-                  {replacementOptions.length === 0 ? (
-                    <SelectItem value="__none__" disabled>No available employees</SelectItem>
-                  ) : replacementOptions.map((e) => (
-                    <SelectItem key={e.id} value={e.id}>{employeeName(e)}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label>New start date *</Label>
-                <Input type="date" value={shuffleStart} min={shuffleEnd} onChange={(e) => setShuffleStart(e.target.value)} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Role</Label>
-                <Input value={shuffleRole} onChange={(e) => setShuffleRole(e.target.value)} placeholder="Defaults to replaced role" />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Notes</Label>
+              <Label>Request notes</Label>
               <Textarea rows={2} value={shuffleNotes} onChange={(e) => setShuffleNotes(e.target.value)} />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShuffleOpen(false)}>Cancel</Button>
-            <Button onClick={saveShuffle} disabled={!shuffleNewId}><Repeat className="mr-2 h-4 w-4" /> Shuffle</Button>
+            <Button onClick={saveShuffle} disabled={shuffleSaving}><Repeat className="mr-2 h-4 w-4" /> {shuffleSaving ? 'Saving...' : 'Submit Request'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

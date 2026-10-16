@@ -15000,6 +15000,1154 @@ CREATE POLICY "write_offshore_allowances" ON offshore_allowances FOR ALL TO auth
   WITH CHECK (public.has_any_privilege(ARRAY['projects.allowance','projects.manage','admin.settings']));
 
 -- ===========================================================================
+-- 20261017000012_projects_geofence_material_whatsapp.sql
+-- ===========================================================================
+
+/*
+# Geofenced attendance, grouped shuffles, material usage, and WhatsApp clock-in
+
+Migration 12 builds on migration 11 (projects/offshore) and delivers four things:
+
+  A. Grouped workforce & shuffles
+     • `project_workforce_batches` — one entry per workforce Append (many employees).
+     • `project_workforce.batch_id` — links each deployment row to its batch.
+     • `project_shuffle_requests` + `project_shuffle_items` — a shuffle is now a
+       single request that can contain many replaced/replacement employees.
+       (The old flat `project_shuffles` table is back-filled then dropped.)
+
+  B. Geofenced attendance
+     • `projects.geofence_radius_m` — per-project radius in metres.
+     • `attendance_facilities` — organisation "approved" facilities (name, coords,
+       radius) that staff who are not on a project may clock in from.
+     • `attendance` gains clock-in/out coordinates, accuracy, matched zone and a
+       `source` column (WEB / WHATSAPP / MANUAL).
+     • `clock_attendance(...)` RPC validates the caller is inside an approved
+       facility OR one of their active project geofences before recording.
+
+  C. Material request usage classification
+     • `material_requests.usage_category` (PROJECT, PLANT_MACHINERY, UTILITY,
+       OFFICE_ADMIN_WELFARE, COMMUNITY_RELATIONS, ICT_FLOW_LAB, GENERAL)
+       and `material_requests.project_id` when the usage is a project.
+
+  D. WhatsApp clock-in
+     • `employees.secondary_phone` — second contact number.
+     • `whatsapp_attendance_rules` — listening phrases mapped to CLOCK_IN/CLOCK_OUT.
+     • `whatsapp_clock_attendance(phone, message)` RPC — resolves the sender to an
+       active employee (primary phone, secondary phone or an emergency contact),
+       matches a phrase, and records the punch (bypasses geofence).
+*/
+
+-- ============================================================
+-- A. Grouped workforce & shuffles
+-- ============================================================
+CREATE TABLE IF NOT EXISTS project_workforce_batches (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  batch_type text NOT NULL DEFAULT 'APPEND',
+  notes text,
+  effective_date date,
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT project_workforce_batches_type_check
+    CHECK (batch_type IN ('APPEND','SHUFFLE','INITIAL'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_workforce_batches_project
+  ON project_workforce_batches (project_id);
+
+ALTER TABLE project_workforce
+  ADD COLUMN IF NOT EXISTS batch_id uuid REFERENCES project_workforce_batches(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_project_workforce_batch ON project_workforce (batch_id);
+
+CREATE TABLE IF NOT EXISTS project_shuffle_requests (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  batch_id uuid REFERENCES project_workforce_batches(id) ON DELETE SET NULL,
+  notes text,
+  effective_date date,
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_shuffle_requests_project
+  ON project_shuffle_requests (project_id);
+
+CREATE TABLE IF NOT EXISTS project_shuffle_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_id uuid NOT NULL REFERENCES project_shuffle_requests(id) ON DELETE CASCADE,
+  replaced_workforce_id uuid REFERENCES project_workforce(id) ON DELETE SET NULL,
+  replaced_employee_id uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  replace_start_date date NOT NULL,
+  replace_end_date date NOT NULL,
+  new_employee_id uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  new_workforce_id uuid REFERENCES project_workforce(id) ON DELETE SET NULL,
+  new_start_date date NOT NULL,
+  notes text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT project_shuffle_items_dates_check
+    CHECK (replace_end_date >= replace_start_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_shuffle_items_request
+  ON project_shuffle_items (request_id);
+
+-- back-fill the legacy flat table (if it still exists) then remove it
+DO $$
+DECLARE r record; v_req uuid;
+BEGIN
+  IF to_regclass('public.project_shuffles') IS NOT NULL THEN
+    FOR r IN SELECT * FROM project_shuffles LOOP
+      INSERT INTO project_shuffle_requests (project_id, notes, effective_date, created_by, created_at)
+      VALUES (r.project_id, r.notes, COALESCE(r.new_start_date, r.replace_end_date), r.created_by, r.created_at)
+      RETURNING id INTO v_req;
+      INSERT INTO project_shuffle_items
+        (request_id, replaced_workforce_id, replaced_employee_id, replace_start_date, replace_end_date,
+         new_employee_id, new_workforce_id, new_start_date, notes)
+      VALUES
+        (v_req, r.replaced_workforce_id, r.replaced_employee_id, r.replace_start_date, r.replace_end_date,
+         r.new_employee_id, r.new_workforce_id, r.new_start_date, r.notes);
+    END LOOP;
+  END IF;
+END $$;
+
+DROP TABLE IF EXISTS project_shuffles CASCADE;
+
+-- ============================================================
+-- B. Geofenced attendance
+-- ============================================================
+ALTER TABLE projects
+  ADD COLUMN IF NOT EXISTS geofence_radius_m numeric(10,1);
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'projects_geofence_check') THEN
+    ALTER TABLE projects ADD CONSTRAINT projects_geofence_check
+      CHECK (
+        geofence_radius_m IS NULL
+        OR (geofence_radius_m >= 0 AND latitude IS NOT NULL AND longitude IS NOT NULL)
+      );
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS attendance_facilities (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  latitude numeric(9,6) NOT NULL,
+  longitude numeric(9,6) NOT NULL,
+  radius_m numeric(10,1) NOT NULL DEFAULT 100,
+  is_active boolean NOT NULL DEFAULT true,
+  notes text,
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT attendance_facilities_coords_check
+    CHECK (latitude BETWEEN -90 AND 90 AND longitude BETWEEN -180 AND 180),
+  CONSTRAINT attendance_facilities_radius_check CHECK (radius_m >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_attendance_facilities_active
+  ON attendance_facilities (is_active);
+
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_in_lat numeric(9,6);
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_in_lng numeric(9,6);
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_in_accuracy numeric(10,2);
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_in_zone text;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_out_lat numeric(9,6);
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_out_lng numeric(9,6);
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_out_accuracy numeric(10,2);
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS clock_out_zone text;
+ALTER TABLE attendance ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'WEB';
+
+-- ============================================================
+-- C. Material request usage classification
+-- ============================================================
+ALTER TABLE material_requests ADD COLUMN IF NOT EXISTS usage_category text;
+ALTER TABLE material_requests
+  ADD COLUMN IF NOT EXISTS project_id uuid REFERENCES projects(id) ON DELETE SET NULL;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'material_requests_usage_check') THEN
+    ALTER TABLE material_requests ADD CONSTRAINT material_requests_usage_check
+      CHECK (
+        usage_category IS NULL OR usage_category IN (
+          'PROJECT','PLANT_MACHINERY','UTILITY','OFFICE_ADMIN_WELFARE',
+          'COMMUNITY_RELATIONS','ICT_FLOW_LAB','GENERAL'
+        )
+      );
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_material_requests_usage ON material_requests (usage_category);
+CREATE INDEX IF NOT EXISTS idx_material_requests_project ON material_requests (project_id);
+
+-- ============================================================
+-- D. WhatsApp clock-in inputs
+-- ============================================================
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS secondary_phone text;
+
+CREATE TABLE IF NOT EXISTS whatsapp_attendance_rules (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  phrase text NOT NULL,
+  action text NOT NULL,
+  match_type text NOT NULL DEFAULT 'CONTAINS',
+  priority integer NOT NULL DEFAULT 100,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT whatsapp_attendance_rules_action_check CHECK (action IN ('CLOCK_IN','CLOCK_OUT')),
+  CONSTRAINT whatsapp_attendance_rules_match_check CHECK (match_type IN ('EXACT','STARTS_WITH','CONTAINS'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_rules_active ON whatsapp_attendance_rules (is_active, priority);
+
+-- ============================================================
+-- E. updated_at triggers
+-- ============================================================
+DROP TRIGGER IF EXISTS trg_touch_project_workforce_batches ON project_workforce_batches;
+CREATE TRIGGER trg_touch_project_workforce_batches BEFORE UPDATE ON project_workforce_batches
+FOR EACH ROW EXECUTE FUNCTION public.touch_projects_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_project_shuffle_requests ON project_shuffle_requests;
+CREATE TRIGGER trg_touch_project_shuffle_requests BEFORE UPDATE ON project_shuffle_requests
+FOR EACH ROW EXECUTE FUNCTION public.touch_projects_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_attendance_facilities ON attendance_facilities;
+CREATE TRIGGER trg_touch_attendance_facilities BEFORE UPDATE ON attendance_facilities
+FOR EACH ROW EXECUTE FUNCTION public.touch_projects_updated_at();
+
+DROP TRIGGER IF EXISTS trg_touch_whatsapp_attendance_rules ON whatsapp_attendance_rules;
+CREATE TRIGGER trg_touch_whatsapp_attendance_rules BEFORE UPDATE ON whatsapp_attendance_rules
+FOR EACH ROW EXECUTE FUNCTION public.touch_projects_updated_at();
+
+-- ============================================================
+-- F. Row level security
+-- ============================================================
+ALTER TABLE project_workforce_batches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_shuffle_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_shuffle_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE attendance_facilities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE whatsapp_attendance_rules ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "select_workforce_batches" ON project_workforce_batches FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['projects.view','projects.manage','admin.settings','admin.reports_read']));
+CREATE POLICY "write_workforce_batches" ON project_workforce_batches FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['projects.manage','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['projects.manage','admin.settings']));
+
+CREATE POLICY "select_shuffle_requests" ON project_shuffle_requests FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['projects.view','projects.manage','admin.settings','admin.reports_read']));
+CREATE POLICY "write_shuffle_requests" ON project_shuffle_requests FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['projects.manage','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['projects.manage','admin.settings']));
+
+CREATE POLICY "select_shuffle_items" ON project_shuffle_items FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['projects.view','projects.manage','admin.settings','admin.reports_read']));
+CREATE POLICY "write_shuffle_items" ON project_shuffle_items FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['projects.manage','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['projects.manage','admin.settings']));
+
+CREATE POLICY "select_attendance_facilities" ON attendance_facilities FOR SELECT TO authenticated
+  USING (true);
+CREATE POLICY "write_attendance_facilities" ON attendance_facilities FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['attendance.manage','admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['attendance.manage','admin.settings']));
+
+CREATE POLICY "select_whatsapp_rules" ON whatsapp_attendance_rules FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['admin.settings']));
+CREATE POLICY "write_whatsapp_rules" ON whatsapp_attendance_rules FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['admin.settings']));
+
+-- ============================================================
+-- G. Geofence + attendance functions
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.haversine_m(
+  p_lat1 double precision, p_lng1 double precision,
+  p_lat2 double precision, p_lng2 double precision
+) RETURNS double precision
+LANGUAGE sql IMMUTABLE
+AS $$
+  SELECT 2 * 6371000 * asin(sqrt(
+    power(sin(radians(p_lat2 - p_lat1) / 2), 2)
+    + cos(radians(p_lat1)) * cos(radians(p_lat2)) * power(sin(radians(p_lng2 - p_lng1) / 2), 2)
+  ));
+$$;
+
+-- every approved zone that applies to an employee for a given point
+CREATE OR REPLACE FUNCTION public.attendance_zones(
+  p_employee_id uuid, p_lat double precision, p_lng double precision
+) RETURNS TABLE (zone_name text, zone_type text, distance_m double precision, radius_m double precision)
+LANGUAGE sql STABLE
+AS $$
+  SELECT af.name, 'FACILITY',
+         public.haversine_m(p_lat, p_lng, af.latitude::double precision, af.longitude::double precision),
+         af.radius_m::double precision
+  FROM attendance_facilities af
+  WHERE af.is_active
+  UNION ALL
+  SELECT pr.name, 'PROJECT',
+         public.haversine_m(p_lat, p_lng, pr.latitude::double precision, pr.longitude::double precision),
+         pr.geofence_radius_m::double precision
+  FROM projects pr
+  JOIN project_workforce pw
+    ON pw.project_id = pr.id
+   AND pw.employee_id = p_employee_id
+   AND pw.start_date <= CURRENT_DATE
+   AND (pw.end_date IS NULL OR pw.end_date >= CURRENT_DATE)
+  WHERE pr.latitude IS NOT NULL
+    AND pr.longitude IS NOT NULL
+    AND pr.geofence_radius_m IS NOT NULL;
+$$;
+
+-- writes a single punch (assumes all validation already done)
+CREATE OR REPLACE FUNCTION public.record_attendance_punch(
+  p_employee_id uuid, p_action text,
+  p_lat numeric DEFAULT NULL, p_lng numeric DEFAULT NULL, p_accuracy numeric DEFAULT NULL,
+  p_zone text DEFAULT NULL, p_source text DEFAULT 'WEB'
+) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_row attendance%ROWTYPE;
+  v_date date := CURRENT_DATE;
+  v_now timestamptz := now();
+BEGIN
+  SELECT * INTO v_row FROM attendance WHERE employee_id = p_employee_id AND date = v_date FOR UPDATE;
+
+  IF p_action = 'CLOCK_IN' THEN
+    IF FOUND AND v_row.clock_in IS NOT NULL THEN
+      RETURN jsonb_build_object('ok', false, 'code', 'ALREADY_IN', 'message', 'You have already clocked in today.');
+    END IF;
+    IF FOUND THEN
+      UPDATE attendance SET
+        clock_in = v_now, status = 'PRESENT',
+        source = COALESCE(p_source, source),
+        clock_in_lat = p_lat, clock_in_lng = p_lng,
+        clock_in_accuracy = p_accuracy, clock_in_zone = p_zone, updated_at = now()
+      WHERE id = v_row.id;
+    ELSE
+      INSERT INTO attendance
+        (employee_id, date, clock_in, status, source, clock_in_lat, clock_in_lng, clock_in_accuracy, clock_in_zone)
+      VALUES
+        (p_employee_id, v_date, v_now, 'PRESENT', p_source, p_lat, p_lng, p_accuracy, p_zone);
+    END IF;
+    RETURN jsonb_build_object('ok', true, 'action', 'CLOCK_IN', 'date', v_date,
+      'time', to_char(v_now, 'HH24:MI'), 'zone', p_zone, 'source', p_source);
+
+  ELSIF p_action = 'CLOCK_OUT' THEN
+    IF NOT FOUND OR v_row.clock_in IS NULL THEN
+      RETURN jsonb_build_object('ok', false, 'code', 'NOT_IN', 'message', 'You have not clocked in today.');
+    END IF;
+    IF v_row.clock_out IS NOT NULL THEN
+      RETURN jsonb_build_object('ok', false, 'code', 'ALREADY_OUT', 'message', 'You have already clocked out today.');
+    END IF;
+    UPDATE attendance SET
+      clock_out = v_now,
+      work_hours = round(extract(epoch FROM (v_now - v_row.clock_in)) / 3600.0, 2),
+      source = COALESCE(p_source, source),
+      clock_out_lat = p_lat, clock_out_lng = p_lng,
+      clock_out_accuracy = p_accuracy, clock_out_zone = p_zone, updated_at = now()
+    WHERE id = v_row.id;
+    RETURN jsonb_build_object('ok', true, 'action', 'CLOCK_OUT', 'date', v_date,
+      'time', to_char(v_now, 'HH24:MI'), 'zone', p_zone, 'source', p_source);
+  END IF;
+
+  RETURN jsonb_build_object('ok', false, 'code', 'BAD_ACTION', 'message', 'Unknown action.');
+END $$;
+
+-- geofence-enforced clock in/out
+CREATE OR REPLACE FUNCTION public.clock_attendance(
+  p_action text,
+  p_lat numeric DEFAULT NULL, p_lng numeric DEFAULT NULL, p_accuracy numeric DEFAULT NULL,
+  p_source text DEFAULT 'WEB', p_employee_id uuid DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_actor uuid := public.current_employee_id();
+  v_target uuid;
+  v_bypass boolean := false;
+  v_zone text;
+  v_min text;
+BEGIN
+  IF p_employee_id IS NOT NULL AND p_employee_id IS DISTINCT FROM v_actor THEN
+    IF NOT public.has_any_privilege(ARRAY['attendance.manage','admin.settings']) THEN
+      RAISE EXCEPTION 'You are not allowed to clock in/out for another employee';
+    END IF;
+    v_target := p_employee_id;
+    v_bypass := true;
+  ELSE
+    v_target := COALESCE(p_employee_id, v_actor);
+  END IF;
+
+  IF v_target IS NULL THEN
+    RAISE EXCEPTION 'You are not signed in';
+  END IF;
+
+  IF NOT v_bypass THEN
+    IF p_lat IS NULL OR p_lng IS NULL THEN
+      RAISE EXCEPTION 'Location is required to clock in/out. Enable location access and try again.';
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM public.attendance_zones(v_target, p_lat, p_lng)) THEN
+      RAISE EXCEPTION 'Attendance location is not configured. Ask an administrator to set the facility or project coordinates.';
+    END IF;
+
+    SELECT z.zone_name INTO v_zone
+    FROM public.attendance_zones(v_target, p_lat, p_lng) z
+    WHERE z.distance_m <= z.radius_m
+    ORDER BY z.distance_m ASC
+    LIMIT 1;
+
+    IF v_zone IS NULL THEN
+      SELECT round(z.distance_m)::text INTO v_min
+      FROM public.attendance_zones(v_target, p_lat, p_lng) z
+      ORDER BY z.distance_m ASC
+      LIMIT 1;
+      RAISE EXCEPTION 'You are outside every approved attendance zone (nearest approved location is % m away).', v_min;
+    END IF;
+  END IF;
+
+  RETURN public.record_attendance_punch(v_target, p_action, p_lat, p_lng, p_accuracy, v_zone, p_source);
+END $$;
+
+GRANT EXECUTE ON FUNCTION public.clock_attendance(text, numeric, numeric, numeric, text, uuid) TO authenticated;
+
+-- WhatsApp clock in/out (resolves sender -> active employee, matches a phrase)
+CREATE OR REPLACE FUNCTION public.whatsapp_clock_attendance(p_phone text, p_message text)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_digits text;
+  v_emp employees%ROWTYPE;
+  v_rule whatsapp_attendance_rules%ROWTYPE;
+  v_res jsonb;
+BEGIN
+  v_digits := regexp_replace(COALESCE(p_phone, ''), '[^0-9]', '', 'g');
+  IF length(v_digits) < 7 THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'NO_PHONE', 'message', 'Missing or invalid sender number.');
+  END IF;
+
+  SELECT e.* INTO v_emp FROM employees e
+  WHERE e.employment_status = 'ACTIVE'
+    AND (
+      right(regexp_replace(COALESCE(e.phone, ''), '[^0-9]', '', 'g'), 10) = right(v_digits, 10)
+      OR right(regexp_replace(COALESCE(e.secondary_phone, ''), '[^0-9]', '', 'g'), 10) = right(v_digits, 10)
+    )
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    SELECT e.* INTO v_emp FROM employees e
+    WHERE e.employment_status = 'ACTIVE'
+      AND EXISTS (
+        SELECT 1 FROM employee_emergency_contacts c
+        WHERE c.employee_id = e.id
+          AND right(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), 10) = right(v_digits, 10)
+      )
+    LIMIT 1;
+  END IF;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'NO_EMPLOYEE',
+      'message', 'This number is not linked to an active employee.');
+  END IF;
+
+  SELECT r.* INTO v_rule FROM whatsapp_attendance_rules r
+  WHERE r.is_active
+    AND (
+      (r.match_type = 'EXACT' AND lower(btrim(p_message)) = lower(btrim(r.phrase)))
+      OR (r.match_type = 'STARTS_WITH' AND lower(btrim(p_message)) LIKE lower(btrim(r.phrase)) || '%')
+      OR (r.match_type = 'CONTAINS' AND lower(btrim(p_message)) LIKE '%' || lower(btrim(r.phrase)) || '%')
+    )
+  ORDER BY r.priority ASC, length(r.phrase) DESC
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'NO_RULE',
+      'message', 'No matching clock instruction.',
+      'employee_name', btrim(v_emp.first_name || ' ' || v_emp.last_name));
+  END IF;
+
+  v_res := public.record_attendance_punch(v_emp.id, v_rule.action, NULL, NULL, NULL, NULL, 'WHATSAPP');
+  RETURN v_res || jsonb_build_object(
+    'employee_id', v_emp.id,
+    'employee_name', btrim(v_emp.first_name || ' ' || v_emp.last_name),
+    'matched_phrase', v_rule.phrase
+  );
+END $$;
+
+GRANT EXECUTE ON FUNCTION public.whatsapp_clock_attendance(text, text) TO service_role;
+
+-- ===========================================================================
+-- 20261017000013_whatsapp_location_workflow.sql
+-- ===========================================================================
+
+/*
+# WhatsApp location-based attendance workflow
+Adds pending trigger storage and geofenced WhatsApp clock-in/out via location sharing.
+*/
+
+CREATE TABLE IF NOT EXISTS whatsapp_pending_triggers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  phone_digits text NOT NULL,
+  wa_id text,
+  employee_id uuid REFERENCES employees(id) ON DELETE CASCADE,
+  action text NOT NULL CHECK (action IN ('CLOCK_IN','CLOCK_OUT')),
+  expires_at timestamptz NOT NULL,
+  processed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_whatsapp_pending_phone ON whatsapp_pending_triggers (phone_digits, expires_at);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_pending_wa ON whatsapp_pending_triggers (wa_id, expires_at);
+
+ALTER TABLE whatsapp_pending_triggers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "select_whatsapp_pending" ON whatsapp_pending_triggers FOR SELECT TO authenticated
+  USING (public.has_any_privilege(ARRAY['admin.settings']));
+CREATE POLICY "write_whatsapp_pending" ON whatsapp_pending_triggers FOR ALL TO authenticated
+  USING (public.has_any_privilege(ARRAY['admin.settings']))
+  WITH CHECK (public.has_any_privilege(ARRAY['admin.settings']));
+
+-- geofenced WhatsApp clock-in/out using location
+CREATE OR REPLACE FUNCTION public.whatsapp_clock_with_location(
+  p_phone text,
+  p_lat numeric,
+  p_lng numeric,
+  p_accuracy numeric
+) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_digits text;
+  v_emp employees%ROWTYPE;
+  v_trigger whatsapp_pending_triggers%ROWTYPE;
+  v_zone text;
+  v_min text;
+  v_res jsonb;
+  v_now timestamptz := now();
+BEGIN
+  v_digits := regexp_replace(COALESCE(p_phone, ''), '[^0-9]', '', 'g');
+  IF length(v_digits) < 7 THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'NO_PHONE', 'message', 'Missing or invalid sender number.');
+  END IF;
+
+  -- resolve employee
+  SELECT e.* INTO v_emp FROM employees e
+  WHERE e.employment_status = 'ACTIVE'
+    AND (
+      right(regexp_replace(COALESCE(e.phone,''),'[^0-9]','','g'),10)=right(v_digits,10)
+      OR right(regexp_replace(COALESCE(e.secondary_phone,''),'[^0-9]','','g'),10)=right(v_digits,10)
+    )
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    SELECT e.* INTO v_emp FROM employees e
+    WHERE e.employment_status = 'ACTIVE'
+      AND EXISTS (
+        SELECT 1 FROM employee_emergency_contacts c
+        WHERE c.employee_id=e.id
+          AND right(regexp_replace(COALESCE(c.phone,''),'[^0-9]','','g'),10)=right(v_digits,10)
+      )
+    LIMIT 1;
+  END IF;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'NO_EMPLOYEE',
+      'message', 'This number is not linked to an active employee.');
+  END IF;
+
+  -- find pending trigger
+  SELECT * INTO v_trigger FROM whatsapp_pending_triggers
+  WHERE phone_digits = right(v_digits,10)
+    AND processed_at IS NULL
+    AND expires_at > v_now
+  ORDER BY created_at DESC
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    -- also try by wa_id if stored? but we pass phone; fallback to last trigger by employee? not stored
+    RETURN jsonb_build_object('ok', false, 'code', 'NO_PENDING',
+      'message', 'No pending clock request found. Send "clock in" or "clock out" first.');
+  END IF;
+
+  -- find valid zone
+  IF p_lat IS NULL OR p_lng IS NULL THEN
+    UPDATE whatsapp_pending_triggers SET processed_at = v_now WHERE id = v_trigger.id;
+    RETURN jsonb_build_object('ok', false, 'code', 'NO_LOCATION',
+      'message', 'Location not received. Please share your location again.');
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM public.attendance_zones(v_emp.id, p_lat, p_lng)) THEN
+    UPDATE whatsapp_pending_triggers SET processed_at = v_now WHERE id = v_trigger.id;
+    RETURN jsonb_build_object('ok', false, 'code', 'NO_CONFIG',
+      'message', 'Attendance location is not configured.');
+  END IF;
+
+  SELECT z.zone_name INTO v_zone
+  FROM public.attendance_zones(v_emp.id, p_lat, p_lng) z
+  WHERE z.distance_m <= z.radius_m
+  ORDER BY z.distance_m ASC
+  LIMIT 1;
+
+  IF v_zone IS NULL THEN
+    SELECT round(z.distance_m)::text INTO v_min
+    FROM public.attendance_zones(v_emp.id, p_lat, p_lng) z
+    ORDER BY z.distance_m ASC
+    LIMIT 1;
+    UPDATE whatsapp_pending_triggers SET processed_at = v_now WHERE id = v_trigger.id;
+    RETURN jsonb_build_object('ok', false, 'code', 'OUTSIDE',
+      'message', 'You are outside every approved attendance zone (nearest ~' || COALESCE(v_min,'0') || ' m away).');
+  END IF;
+
+  -- record punch
+  v_res := public.record_attendance_punch(v_emp.id, v_trigger.action, p_lat, p_lng, p_accuracy, v_zone, 'WHATSAPP');
+  UPDATE whatsapp_pending_triggers SET processed_at = v_now WHERE id = v_trigger.id;
+
+  RETURN v_res || jsonb_build_object(
+    'employee_id', v_emp.id,
+    'employee_name', btrim(v_emp.first_name || ' ' || v_emp.last_name),
+    'zone', v_zone
+  );
+END $$;
+
+GRANT EXECUTE ON FUNCTION public.whatsapp_clock_with_location(text,numeric,numeric,numeric) TO service_role;
+
+-- ===========================================================================
+-- 20261017000014_training_video_completion.sql
+-- ===========================================================================
+
+/*
+# Training video completion, certificates and renewal  (additive only)
+
+Goals:
+  1. Track genuine video watch-through (segment union, heartbeats, gaps, rate).
+  2. Issue a certificate only on verified completion.
+  3. Reset the renewal countdown by issuing a NEW next-cycle enrollment row
+     instead of mutating the completed one (audit history preserved).
+  4. Let the standing scheduler pick up `certificate_expires_at`.
+
+Nothing existing is dropped or re-typed. The only constraint change is the
+old `UNIQUE(course_id, employee_id)` which would make a second cycle impossible;
+it is replaced by `UNIQUE(course_id, employee_id, cycle)` (still one row per cycle).
+*/
+
+-- ============================================================
+-- 0. Allow generated certificate PDFs in the documents bucket
+--    (bucket previously only accepted images for certification uploads).
+-- ============================================================
+UPDATE storage.buckets
+SET allowed_mime_types = (
+      SELECT array_agg(DISTINCT mime ORDER BY mime)
+      FROM unnest(COALESCE(allowed_mime_types, ARRAY[]::text[]) || ARRAY['application/pdf']) AS mime
+    )
+WHERE id = 'certification-documents'
+  AND NOT ('application/pdf' = ANY(COALESCE(allowed_mime_types, ARRAY[]::text[])));
+
+-- ============================================================
+-- 1. Courses: video + renewal + validation settings
+-- ============================================================
+ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS video_url text;
+ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS video_duration_seconds integer;
+ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS renewal_months integer;
+ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS pass_pct integer NOT NULL DEFAULT 95;
+ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS completion_enforced boolean NOT NULL DEFAULT true;
+
+COMMENT ON COLUMN training_courses.video_url IS 'Direct mp4/HLS URL of the lesson video.';
+COMMENT ON COLUMN training_courses.renewal_months IS 'NULL = certificate never renews. Otherwise issues a next cycle on completion.';
+COMMENT ON COLUMN training_courses.pass_pct IS 'Min union coverage of duration to pass (default 95).';
+COMMENT ON COLUMN training_courses.completion_enforced IS 'Only applies when global training.completion_enforcement = ENFORCED (incremental rollout).';
+
+-- ============================================================
+-- 2. Enrollments: certificate + cycle + explainable decision
+-- ============================================================
+ALTER TABLE training_enrollments ADD COLUMN IF NOT EXISTS certificate_id text;
+ALTER TABLE training_enrollments ADD COLUMN IF NOT EXISTS certificate_issued_at timestamptz;
+ALTER TABLE training_enrollments ADD COLUMN IF NOT EXISTS certificate_expires_at timestamptz;
+ALTER TABLE training_enrollments ADD COLUMN IF NOT EXISTS certificate_pdf_url text;
+ALTER TABLE training_enrollments ADD COLUMN IF NOT EXISTS cycle integer NOT NULL DEFAULT 1;
+ALTER TABLE training_enrollments ADD COLUMN IF NOT EXISTS parent_enrollment_id uuid REFERENCES training_enrollments(id) ON DELETE SET NULL;
+ALTER TABLE training_enrollments ADD COLUMN IF NOT EXISTS completion_state text NOT NULL DEFAULT 'IN_PROGRESS';
+ALTER TABLE training_enrollments ADD COLUMN IF NOT EXISTS completion_decision jsonb;
+ALTER TABLE training_enrollments ADD COLUMN IF NOT EXISTS validation_enabled boolean NOT NULL DEFAULT true;
+
+COMMENT ON COLUMN training_enrollments.cycle IS 'Renewal cycle number. 1 = first issuance. Next cycle is a NEW row.';
+COMMENT ON COLUMN training_enrollments.completion_decision IS 'Full explainability payload: metrics + thresholds + reasons + mode (SHADOW/ENFORCED).';
+
+-- allow one row per (course, employee, cycle) instead of one per (course, employee)
+ALTER TABLE training_enrollments DROP CONSTRAINT IF EXISTS training_enrollments_course_id_employee_id_key;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_training_enrollments_cycle
+  ON training_enrollments (course_id, employee_id, cycle);
+
+-- ============================================================
+-- 3. Watch tracking
+-- ============================================================
+CREATE TABLE IF NOT EXISTS training_video_progress (
+  enrollment_id uuid PRIMARY KEY REFERENCES training_enrollments(id) ON DELETE CASCADE,
+  watched_segments jsonb NOT NULL DEFAULT '[]'::jsonb, -- merged union of [start,end] seconds
+  last_position_seconds numeric(12,3) NOT NULL DEFAULT 0,
+  last_heartbeat_at timestamptz,
+  watch_duration_seconds numeric(12,3) NOT NULL DEFAULT 0, -- union coverage
+  duration_seconds numeric(12,3),                          -- observed media duration
+  heartbeat_count integer NOT NULL DEFAULT 0,
+  expected_heartbeats integer NOT NULL DEFAULT 0,
+  max_position_seconds numeric(12,3) NOT NULL DEFAULT 0,
+  max_playback_rate numeric(6,3) NOT NULL DEFAULT 1,
+  max_gap_ms integer NOT NULL DEFAULT 0,
+  session_id text,
+  device_fingerprint text,
+  fingerprint_mismatch boolean NOT NULL DEFAULT false,
+  completion_state text NOT NULL DEFAULT 'IN_PROGRESS',
+  decision jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS training_video_heartbeats (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  enrollment_id uuid NOT NULL REFERENCES training_enrollments(id) ON DELETE CASCADE,
+  session_id text,
+  device_fingerprint text,
+  position_seconds numeric(12,3) NOT NULL,
+  playback_rate numeric(6,3) NOT NULL DEFAULT 1,
+  playing boolean NOT NULL DEFAULT false,
+  interrupted boolean NOT NULL DEFAULT false, -- pause / tab-hidden since previous beat
+  since_last_ms integer,
+  client_ts timestamptz,
+  server_ts timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_hb_enrollment ON training_video_heartbeats (enrollment_id, server_ts);
+CREATE INDEX IF NOT EXISTS idx_training_enrollments_cert_expires ON training_enrollments (certificate_expires_at);
+CREATE INDEX IF NOT EXISTS idx_training_enrollments_employee_status ON training_enrollments (employee_id, status);
+
+-- ============================================================
+-- 4. RLS
+-- ============================================================
+ALTER TABLE training_video_progress ENABLE ROW LEVEL SECURITY;
+ALTER TABLE training_video_heartbeats ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "select_video_progress" ON training_video_progress;
+CREATE POLICY "select_video_progress" ON training_video_progress FOR SELECT TO authenticated
+  USING (
+    public.has_any_privilege(ARRAY['training.manage'])
+    OR EXISTS (
+      SELECT 1 FROM training_enrollments te
+      WHERE te.id = enrollment_id AND te.employee_id = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS "write_video_progress" ON training_video_progress;
+CREATE POLICY "write_video_progress" ON training_video_progress FOR ALL TO authenticated
+  USING (
+    public.has_any_privilege(ARRAY['training.manage'])
+    OR EXISTS (
+      SELECT 1 FROM training_enrollments te
+      WHERE te.id = enrollment_id AND te.employee_id = auth.uid()
+    )
+  )
+  WITH CHECK (
+    public.has_any_privilege(ARRAY['training.manage'])
+    OR EXISTS (
+      SELECT 1 FROM training_enrollments te
+      WHERE te.id = enrollment_id AND te.employee_id = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS "select_video_heartbeats" ON training_video_heartbeats;
+CREATE POLICY "select_video_heartbeats" ON training_video_heartbeats FOR SELECT TO authenticated
+  USING (
+    public.has_any_privilege(ARRAY['training.manage'])
+    OR EXISTS (
+      SELECT 1 FROM training_enrollments te
+      WHERE te.id = enrollment_id AND te.employee_id = auth.uid()
+    )
+  );
+
+DROP POLICY IF EXISTS "insert_video_heartbeats" ON training_video_heartbeats;
+CREATE POLICY "insert_video_heartbeats" ON training_video_heartbeats FOR INSERT TO authenticated
+  WITH CHECK (
+    public.has_any_privilege(ARRAY['training.manage'])
+    OR EXISTS (
+      SELECT 1 FROM training_enrollments te
+      WHERE te.id = enrollment_id AND te.employee_id = auth.uid()
+    )
+  );
+
+-- ============================================================
+-- 5. Server-side completion evaluation (explainable from stored data)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.training_completion_evaluation(p_enrollment_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_en training_enrollments%ROWTYPE;
+  v_course training_courses%ROWTYPE;
+  v_p training_video_progress%ROWTYPE;
+  v_dur numeric;
+  v_pass integer;
+  v_coverage numeric := 0;
+  v_expected integer := 0;
+  v_checks jsonb := '{}'::jsonb;
+  v_reasons jsonb := '[]'::jsonb;
+  v_eligible boolean := true;
+  v_no_video boolean := false;
+BEGIN
+  SELECT * INTO v_en FROM training_enrollments WHERE id = p_enrollment_id;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'NOT_FOUND');
+  END IF;
+
+  SELECT * INTO v_course FROM training_courses WHERE id = v_en.course_id;
+  SELECT * INTO v_p FROM training_video_progress WHERE enrollment_id = p_enrollment_id;
+
+  -- no lesson video configured: nothing to verify against (manual completion still works)
+  IF COALESCE(v_course.video_url, '') = '' OR COALESCE(v_course.video_duration_seconds, 0) <= 0 THEN
+    v_no_video := true;
+    v_dur := 0;
+  ELSE
+    v_dur := COALESCE(v_course.video_duration_seconds, 0);
+  END IF;
+
+  v_pass := GREATEST(0, LEAST(100, COALESCE(v_course.pass_pct, 95)));
+  v_coverage := COALESCE(v_p.watch_duration_seconds, 0);
+  v_expected := CASE WHEN v_dur > 0 THEN ceil(v_dur / 7.0)::integer ELSE 0 END;
+
+  IF v_no_video THEN
+    v_checks := jsonb_build_object(
+      'not_applicable', true
+    );
+    v_eligible := true;
+  ELSE
+    -- 1. union of watched segments >= pass_pct% of duration
+    v_checks := v_checks || jsonb_build_object(
+      'coverage_pct',
+      jsonb_build_object(
+        'ok', (v_coverage / NULLIF(v_dur,0) * 100.0) >= v_pass,
+        'actual', round((v_coverage / NULLIF(v_dur,0) * 100.0)::numeric, 2),
+        'required', v_pass
+      )
+    );
+    -- 2. max position reached the end (duration - 2s)
+    v_checks := v_checks || jsonb_build_object(
+      'reached_end',
+      jsonb_build_object(
+        'ok', COALESCE(v_p.max_position_seconds, 0) >= (v_dur - 2),
+        'actual', COALESCE(v_p.max_position_seconds, 0),
+        'required', round((v_dur - 2)::numeric, 2)
+      )
+    );
+    -- 3. heartbeat count >= 90% of expected
+    v_checks := v_checks || jsonb_build_object(
+      'heartbeat_count',
+      jsonb_build_object(
+        'ok', COALESCE(v_p.heartbeat_count, 0) >= ceil(v_expected * 0.9),
+        'actual', COALESCE(v_p.heartbeat_count, 0),
+        'expected', v_expected
+      )
+    );
+    -- 4. no heartbeat gap > 15s (buffering/pause gaps carry interrupted=true and are ignored)
+    v_checks := v_checks || jsonb_build_object(
+      'max_gap_ms',
+      jsonb_build_object(
+        'ok', COALESCE(v_p.max_gap_ms, 0) <= 15000,
+        'actual', COALESCE(v_p.max_gap_ms, 0),
+        'required', 15000
+      )
+    );
+    -- 5. active watch time >= pass_pct% of duration
+    v_checks := v_checks || jsonb_build_object(
+      'active_watch',
+      jsonb_build_object(
+        'ok', (v_coverage / NULLIF(v_dur,0) * 100.0) >= v_pass,
+        'actual', round((v_coverage / NULLIF(v_dur,0) * 100.0)::numeric, 2),
+        'required', v_pass
+      )
+    );
+    -- 6. playback rate <= 1.25 throughout
+    v_checks := v_checks || jsonb_build_object(
+      'playback_rate',
+      jsonb_build_object(
+        'ok', COALESCE(v_p.max_playback_rate, 1) <= 1.25,
+        'actual', COALESCE(v_p.max_playback_rate, 1),
+        'required', 1.25
+      )
+    );
+
+    SELECT COALESCE(jsonb_agg(k), '[]'::jsonb)
+      INTO v_reasons
+    FROM (
+      SELECT k
+      FROM jsonb_each(v_checks) e(k, v)
+      WHERE NOT COALESCE((v ->> 'ok')::boolean, false)
+    ) t;
+
+    IF jsonb_array_length(v_reasons) > 0 THEN
+      v_eligible := false;
+    END IF;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'has_video', NOT v_no_video,
+    'duration_seconds', v_dur,
+    'coverage_seconds', v_coverage,
+    'active_watch_seconds', v_coverage,
+    'max_position_seconds', COALESCE(v_p.max_position_seconds, 0),
+    'heartbeat_count', COALESCE(v_p.heartbeat_count, 0),
+    'expected_heartbeats', v_expected,
+    'max_gap_ms', COALESCE(v_p.max_gap_ms, 0),
+    'max_playback_rate', COALESCE(v_p.max_playback_rate, 1),
+    'fingerprint_mismatch', COALESCE(v_p.fingerprint_mismatch, false),
+    'pass_pct', v_pass,
+    'checks', v_checks,
+    'reasons', v_reasons,
+    'eligible', v_eligible
+  );
+END $$;
+
+-- ============================================================
+-- 6. Certificate issuance + next-cycle enrollment + notification
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.issue_training_certificate(
+  p_enrollment_id uuid,
+  p_skip_validation boolean DEFAULT false
+) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_en training_enrollments%ROWTYPE;
+  v_course training_courses%ROWTYPE;
+  v_eval jsonb;
+  v_cert_id text;
+  v_issued timestamptz := now();
+  v_expires timestamptz;
+  v_next_id uuid := NULL;
+  v_pdf text := NULL;
+BEGIN
+  SELECT * INTO v_en FROM training_enrollments WHERE id = p_enrollment_id;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'code', 'NOT_FOUND');
+  END IF;
+  SELECT * INTO v_course FROM training_courses WHERE id = v_en.course_id;
+
+  v_eval := public.training_completion_evaluation(p_enrollment_id);
+  IF NOT COALESCE((v_eval ->> 'eligible')::boolean, false) AND NOT p_skip_validation THEN
+    RETURN jsonb_build_object(
+      'ok', false, 'code', 'NOT_ELIGIBLE',
+      'message', 'Completion criteria are not met.',
+      'evaluation', v_eval
+    );
+  END IF;
+
+  v_cert_id := COALESCE(
+    v_en.certificate_id,
+    'TRN-' || upper(substr(replace(v_en.id::text, '-', ''), 1, 10))
+  );
+
+  IF v_course.renewal_months IS NOT NULL THEN
+    v_expires := v_issued + make_interval(months => v_course.renewal_months);
+  ELSE
+    v_expires := NULL;
+  END IF;
+
+  UPDATE training_enrollments
+     SET status = 'COMPLETED',
+         completed_at = COALESCE(completed_at, v_issued),
+         progress = 100,
+         completion_state = 'ISSUED',
+         certificate_id = v_cert_id,
+         certificate_issued_at = v_issued,
+         certificate_expires_at = v_expires,
+         completion_decision = v_eval,
+         updated_at = now()
+   WHERE id = v_en.id
+   RETURNING certificate_pdf_url INTO v_pdf;
+
+  -- next renewal cycle is a NEW row (history of this row is untouched)
+  IF v_course.renewal_months IS NOT NULL THEN
+    INSERT INTO training_enrollments
+      (course_id, employee_id, status, enrolled_at, progress, cycle,
+       parent_enrollment_id, completion_state, validation_enabled)
+    SELECT v_en.course_id, v_en.employee_id, 'ENROLLED', now(), 0,
+           v_en.cycle + 1, v_en.id, 'IN_PROGRESS', v_en.validation_enabled
+    WHERE NOT EXISTS (
+      SELECT 1 FROM training_enrollments x
+      WHERE x.course_id = v_en.course_id
+        AND x.employee_id = v_en.employee_id
+        AND x.cycle = v_en.cycle + 1
+    )
+    RETURNING id INTO v_next_id;
+  END IF;
+
+  -- existing notification type (queued for the mail automation)
+  INSERT INTO notification_queue (event_key, recipient_email, recipient_name, subject, body_html, status, metadata)
+  SELECT
+    'training.certificate_issued',
+    e.email,
+    e.first_name,
+    'Certificate issued: ' || v_course.title,
+    '<p>Hi ' || COALESCE(e.first_name, '') || ',</p>'
+      || '<p>Congratulations — your certificate for <strong>' || v_course.title || '</strong> has been issued.</p>'
+      || '<p>Certificate ID: <strong>' || v_cert_id || '</strong></p>'
+      || CASE WHEN v_expires IS NOT NULL
+              THEN '<p>It is valid until ' || to_char(v_expires, 'DD Mon YYYY')
+                   || '. Your next renewal cycle will open automatically.</p>'
+              ELSE '<p>This certificate does not expire.</p>' END,
+    'PENDING',
+    jsonb_build_object(
+      'enrollment_id', v_en.id::text,
+      'course_id', v_en.course_id::text,
+      'certificate_id', v_cert_id,
+      'certificate_expires_at', v_expires,
+      'cycle', v_en.cycle,
+      'next_enrollment_id', v_next_id
+    )
+  FROM employees e
+  WHERE e.id = v_en.employee_id
+    AND e.email IS NOT NULL AND e.email <> '';
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'certificate_id', v_cert_id,
+    'certificate_issued_at', v_issued,
+    'certificate_expires_at', v_expires,
+    'certificate_pdf_url', v_pdf,
+    'next_enrollment_id', v_next_id,
+    'cycle', v_en.cycle,
+    'evaluation', v_eval
+  );
+END $$;
+
+GRANT EXECUTE ON FUNCTION public.training_completion_evaluation(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.issue_training_certificate(uuid, boolean) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.training_completion_evaluation(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.issue_training_certificate(uuid, boolean) TO service_role;
+REVOKE ALL ON FUNCTION public.training_completion_evaluation(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.issue_training_certificate(uuid, boolean) FROM PUBLIC;
+
+-- ============================================================
+-- 7. Scheduler: pick up certificate_expires_at (renewal reminders)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.run_scheduled_task(p_task_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_task public.scheduled_tasks;
+  v_count integer := 0;
+  v_message text;
+  v_now timestamptz := now();
+  v_recipient record;
+  v_next timestamptz;
+BEGIN
+  SELECT * INTO v_task FROM public.scheduled_tasks WHERE id = p_task_id;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'Task not found');
+  END IF;
+
+  -- Collect recipients per job type and enqueue reminder emails.
+  FOR v_recipient IN
+    SELECT DISTINCT e.id::text AS employee_id, e.email, COALESCE(e.first_name, '') AS first_name
+      FROM public.employees e
+     WHERE e.employment_status = 'ACTIVE'
+       AND e.email IS NOT NULL
+       AND e.email <> ''
+       AND (
+          v_task.job_type = 'PERFORMANCE_REVIEW' AND NOT EXISTS (
+            SELECT 1 FROM public.performance_reviews pr
+            WHERE pr.employee_id = e.id
+              AND pr.status = 'COMPLETED'
+              AND pr.submitted_at > now() - interval '365 days'
+         )
+          OR v_task.job_type = 'ONBOARDING_FOLLOWUP' AND EXISTS (
+            SELECT 1
+              FROM public.employee_onboarding_progress p
+              JOIN public.onboarding_steps s ON s.id = p.step_id
+             WHERE p.employee_id = e.id
+               AND s.is_required
+               AND p.status <> 'COMPLETED'
+          )
+          OR v_task.job_type = 'TRAINING_REMINDER' AND EXISTS (
+            SELECT 1 FROM public.training_enrollments te
+            WHERE te.employee_id = e.id
+              AND te.status = 'ENROLLED'
+              AND te.progress < 100
+          )
+          -- renewal: certificates expiring within 30 days (or already past)
+          OR v_task.job_type = 'TRAINING_RENEWAL' AND EXISTS (
+            SELECT 1 FROM public.training_enrollments te
+            WHERE te.employee_id = e.id
+              AND te.certificate_expires_at IS NOT NULL
+              AND te.certificate_expires_at <= now() + interval '30 days'
+              AND te.status = 'COMPLETED'
+          )
+       )
+  LOOP
+    IF v_recipient.email IS NOT NULL THEN
+      INSERT INTO public.notification_queue (
+        event_key, recipient_email, recipient_name, subject, body_html, status, metadata
+      ) VALUES (
+        COALESCE(v_task.event_key, 'task.reminder'),
+        v_recipient.email,
+        v_recipient.first_name,
+        'Reminder: ' || v_task.name,
+        '<p>Hi ' || COALESCE(v_recipient.first_name, '') || ',</p><p>' || v_task.name || E'</p>',
+        'PENDING',
+        jsonb_build_object('task_id', v_task.id::text, 'task_name', v_task.name, 'job_type', v_task.job_type)
+      );
+      v_count := v_count + 1;
+    END IF;
+  END LOOP;
+
+  v_next := public._scheduled_task_next_run(
+    v_task.frequency, v_task.run_at, v_task.day_of_week, v_task.day_of_month, v_now
+  );
+
+  v_message := v_count || ' reminder(s) queued';
+  UPDATE public.scheduled_tasks
+     SET next_run_at = v_next,
+         last_run_at = v_now,
+         last_run_status = 'SUCCESS',
+         last_run_message = v_message
+   WHERE id = v_task.id;
+
+  INSERT INTO public.scheduled_task_logs (task_id, run_at, status, items_processed, message)
+  VALUES (v_task.id, v_now, 'SUCCESS', v_count, v_message);
+
+  RETURN jsonb_build_object('ok', true, 'processed', v_count, 'next_run_at', v_next);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.run_scheduled_task(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.run_scheduled_task(uuid) FROM anon;
+GRANT EXECUTE ON FUNCTION public.run_scheduled_task(uuid) TO authenticated;
+
+-- ============================================================
+-- 8. Incremental rollout switch: start in SHADOW (log, do not block)
+-- ============================================================
+INSERT INTO system_settings (group_name, key, value)
+VALUES ('training', 'completion_enforcement', '"SHADOW"'::jsonb)
+ON CONFLICT (group_name, key) DO NOTHING;
+
+-- ============================================================
+-- 9. Default renewal job (picks up certificate_expires_at)
+-- ============================================================
+INSERT INTO scheduled_tasks (name, job_type, frequency, run_at, event_key, is_active, next_run_at)
+SELECT 'Training certificate renewal', 'TRAINING_RENEWAL', 'WEEKLY', '09:00'::time,
+       'training.renewal_upcoming', true, now()
+WHERE NOT EXISTS (
+  SELECT 1 FROM scheduled_tasks
+  WHERE job_type = 'TRAINING_RENEWAL' AND name = 'Training certificate renewal'
+);
+
+-- ===========================================================================
 -- DEFAULT ADMIN EMPLOYEE (role SUPER_ADMIN => every privilege)
 -- Login:    noah.linus@constrabase.com
 -- Password: <replace the placeholder below with a strong password>

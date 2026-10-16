@@ -119,8 +119,9 @@ const RULES: Rule[] = [
   { re: /^\/reports(\/|$)/, guard: { anyPrivilege: ['admin.reports', 'admin.reports_read'] } },
   { re: /^\/settings\/access/, guard: { privilege: 'admin.privileges' } },
   { re: /^\/settings\/audit-log/, guard: { privilege: 'admin.audit' } },
+  { re: /^\/settings\/attendance-geofence/, guard: { anyPrivilege: ['attendance.manage', 'admin.settings'] } },
   {
-    re: /^\/settings\/(branding|company|payments|smtp|templates|email-queue|fields|workflows|onboarding-templates|scheduler|security|network-schedule|performance)/,
+    re: /^\/settings\/(branding|company|payments|smtp|templates|email-queue|fields|workflows|onboarding-templates|scheduler|security|network-schedule|performance|whatsapp)/,
     guard: { privilege: 'admin.settings' },
   },
 ];

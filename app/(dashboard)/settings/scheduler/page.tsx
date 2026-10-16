@@ -50,6 +50,7 @@ const jobTypes = [
   { value: 'PERFORMANCE_REVIEW', label: 'Performance review due' },
   { value: 'ONBOARDING_FOLLOWUP', label: 'Onboarding follow-up' },
   { value: 'TRAINING_REMINDER', label: 'Training reminder' },
+  { value: 'TRAINING_RENEWAL', label: 'Training certificate renewal' },
   { value: 'TRIAL_MILESTONE', label: 'Trial milestone (30/60/90)' },
   { value: 'CUSTOM', label: 'Custom reminder' },
 ];

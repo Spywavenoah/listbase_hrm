@@ -73,6 +73,8 @@ export interface MaterialRequest {
   requested_by: string | null;
   department_id: string | null;
   warehouse_id: string | null;
+  project_id: string | null;
+  usage_category: string | null;
   purpose: string | null;
   required_date: string | null;
   priority: string;
@@ -85,6 +87,16 @@ export interface MaterialRequest {
 }
 
 export const MATERIAL_REQUEST_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'ISSUED', 'CANCELLED'];
+
+export const MATERIAL_USAGE_CATEGORIES = [
+  { value: 'PROJECT', label: 'Project' },
+  { value: 'PLANT_MACHINERY', label: 'Plant & Machinery' },
+  { value: 'UTILITY', label: 'Utility' },
+  { value: 'OFFICE_ADMIN_WELFARE', label: 'Office Admin & Welfare' },
+  { value: 'COMMUNITY_RELATIONS', label: 'Community Relations' },
+  { value: 'ICT_FLOW_LAB', label: 'ICT / Flow Lab' },
+  { value: 'GENERAL', label: 'General Use' },
+];
 
 export const MATERIAL_PRIORITIES = [
   { value: 'LOW', label: 'Low' },

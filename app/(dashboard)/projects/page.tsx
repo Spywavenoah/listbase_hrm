@@ -21,6 +21,7 @@ import {
   projectStatusClass,
   fmtDate,
   fmtCoord,
+  fmtMeters,
   mapsUrl,
   type Project,
 } from '@/lib/projects';
@@ -33,6 +34,7 @@ const EMPTY = {
   location_name: '',
   latitude: '',
   longitude: '',
+  geofence_radius_m: '',
   is_offshore: true,
   start_date: '',
   end_date: '',
@@ -86,6 +88,7 @@ export default function ProjectsPage() {
       location_name: p.location_name || '',
       latitude: p.latitude == null ? '' : String(p.latitude),
       longitude: p.longitude == null ? '' : String(p.longitude),
+      geofence_radius_m: p.geofence_radius_m == null ? '' : String(p.geofence_radius_m),
       is_offshore: p.is_offshore,
       start_date: p.start_date || '',
       end_date: p.end_date || '',
@@ -98,12 +101,18 @@ export default function ProjectsPage() {
     if (!form.name.trim()) { toast.error('Project name is required'); return; }
     const lat = form.latitude.trim();
     const lng = form.longitude.trim();
+    const radius = form.geofence_radius_m.trim();
     if ((lat && !lng) || (!lat && lng)) {
       toast.error('Provide both latitude & longitude, or leave both empty');
       return;
     }
     if (lat && (Number(lat) < -90 || Number(lat) > 90)) { toast.error('Latitude must be between -90 and 90'); return; }
     if (lng && (Number(lng) < -180 || Number(lng) > 180)) { toast.error('Longitude must be between -180 and 180'); return; }
+    if (radius && (!lat || !lng)) {
+      toast.error('Set the project coordinates before adding a geofence radius');
+      return;
+    }
+    if (radius && Number(radius) < 0) { toast.error('Geofence radius cannot be negative'); return; }
     if (form.start_date && form.end_date && form.end_date < form.start_date) {
       toast.error('End date cannot be before the start date');
       return;
@@ -117,6 +126,7 @@ export default function ProjectsPage() {
         location_name: form.location_name.trim() || null,
         latitude: lat ? Number(lat) : null,
         longitude: lng ? Number(lng) : null,
+        geofence_radius_m: radius && lat && lng ? Number(radius) : null,
         is_offshore: form.is_offshore,
         start_date: form.start_date || null,
         end_date: form.end_date || null,
@@ -177,6 +187,14 @@ export default function ProjectsPage() {
         );
       },
       searchText: (p) => [p.location_name || '', fmtCoord(p.latitude, p.longitude)],
+    },
+    {
+      key: 'geofence',
+      label: 'Geofence',
+      render: (p) => p.geofence_radius_m != null
+        ? <span className="text-xs">{fmtMeters(p.geofence_radius_m)}</span>
+        : <span className="text-xs text-muted-foreground">Off</span>,
+      searchable: false,
     },
     {
       key: 'is_offshore',
@@ -270,6 +288,21 @@ export default function ProjectsPage() {
                 <Label>Longitude</Label>
                 <Input type="number" step="0.000001" min={-180} max={180} value={form.longitude} onChange={(e) => setForm({ ...form, longitude: e.target.value })} placeholder="3.421999" />
               </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Attendance geofence radius (metres)</Label>
+              <Input
+                type="number"
+                min={0}
+                step="1"
+                value={form.geofence_radius_m}
+                onChange={(e) => setForm({ ...form, geofence_radius_m: e.target.value })}
+                placeholder="e.g. 150 (leave blank to disable geofenced clock-in)"
+                disabled={!form.latitude.trim() || !form.longitude.trim()}
+              />
+              <p className="text-xs text-muted-foreground">
+                Staff deployed here may clock in/out within this radius of the project coordinates.
+              </p>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">

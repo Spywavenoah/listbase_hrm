@@ -7,10 +7,22 @@ export interface Project {
   location_name: string | null;
   latitude: number | null;
   longitude: number | null;
+  geofence_radius_m: number | null;
   is_offshore: boolean;
   start_date: string | null;
   end_date: string | null;
   status: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface WorkforceBatch {
+  id: string;
+  project_id: string;
+  batch_type: string;
+  notes: string | null;
+  effective_date: string | null;
+  created_by: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -23,13 +35,24 @@ export interface ProjectWorkforce {
   start_date: string;
   end_date: string | null;
   source: string;
+  batch_id: string | null;
   notes: string | null;
   created_at?: string | null;
 }
 
-export interface ProjectShuffle {
+export interface ProjectShuffleRequest {
   id: string;
   project_id: string;
+  batch_id: string | null;
+  notes: string | null;
+  effective_date: string | null;
+  created_by: string | null;
+  created_at?: string | null;
+}
+
+export interface ProjectShuffleItem {
+  id: string;
+  request_id: string;
   replaced_workforce_id: string | null;
   replaced_employee_id: string;
   replace_start_date: string;
@@ -86,6 +109,15 @@ export const WORKFORCE_SOURCES = [
 ];
 
 export const ALLOWANCE_CURRENCIES = ['USD', 'EUR', 'GBP', 'KES', 'NGN', 'ZAR', 'AED', 'SAR', 'XOF'];
+
+export const DEFAULT_GEOFENCE_RADIUS_M = 150;
+
+export function fmtMeters(value?: number | string | null): string {
+  if (value === null || value === undefined || value === '') return '—';
+  const n = Number(value);
+  if (!isFinite(n)) return '—';
+  return n >= 1000 ? `${(n / 1000).toFixed(n % 1000 === 0 ? 0 : 1)} km` : `${n.toFixed(0)} m`;
+}
 
 export function labelFor(options: { value: string; label: string }[], value: string | null | undefined): string {
   if (!value) return '—';

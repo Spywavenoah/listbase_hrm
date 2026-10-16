@@ -17,6 +17,7 @@ import { refNumber } from '@/lib/procurement';
 import { startWorkflow, setWorkflowActors } from '@/lib/workflow/engine';
 import {
   MATERIAL_PRIORITIES,
+  MATERIAL_USAGE_CATEGORIES,
   fmtDate,
   fmtQty,
   type InventoryItem,
@@ -26,16 +27,22 @@ import {
 
 interface Warehouse { id: string; name: string; is_default: boolean }
 interface Department { id: string; name: string }
+interface ProjectRef { id: string; code: string | null; name: string }
 interface Line { item_id: string; quantity: string; notes: string }
 
 const EMPTY_FORM = {
   warehouse_id: '',
   department_id: '',
+  usage_category: '',
+  project_id: '',
   purpose: '',
   required_date: '',
   priority: 'NORMAL',
   notes: '',
 };
+
+const usageLabel = (value: string | null) =>
+  MATERIAL_USAGE_CATEGORIES.find((u) => u.value === value)?.label ?? '—';
 
 const statusClass = (status: string) => {
   switch (status) {
@@ -57,6 +64,7 @@ export default function MaterialRequestsPage() {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
+  const [projects, setProjects] = useState<ProjectRef[]>([]);
   const [stockMap, setStockMap] = useState<Record<string, number>>({});
   const [employeeNames, setEmployeeNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -81,6 +89,8 @@ export default function MaterialRequestsPage() {
         supabase.from('inventory_stock').select('item_id, warehouse_id, quantity'),
         supabase.rpc('get_procurement_employee_list'),
       ]);
+      const { data: projData } = await supabase.from('projects').select('id, code, name').order('name');
+      setProjects((projData || []) as unknown as ProjectRef[]);
       setRows((rRes.data || []) as unknown as MaterialRequest[]);
       const grouped: Record<string, MaterialRequestItem[]> = {};
       for (const it of (iRes.data || []) as unknown as MaterialRequestItem[]) {
@@ -124,6 +134,8 @@ export default function MaterialRequestsPage() {
     const valid = lines.filter((l) => l.item_id || l.quantity);
     if (valid.length === 0) { toast.error('Add at least one item to the request'); return false; }
     if (!form.warehouse_id) { toast.error('Select a warehouse to release from'); return false; }
+    if (!form.usage_category) { toast.error('Select a usage category'); return false; }
+    if (form.usage_category === 'PROJECT' && !form.project_id) { toast.error('Select the project this request is for'); return false; }
 
     lines.forEach((l, idx) => {
       if (!l.item_id && !l.quantity) return;
@@ -158,6 +170,8 @@ export default function MaterialRequestsPage() {
         requested_by: employee?.id || null,
         department_id: form.department_id || null,
         warehouse_id: form.warehouse_id,
+        usage_category: form.usage_category || null,
+        project_id: form.usage_category === 'PROJECT' ? form.project_id || null : null,
         purpose: form.purpose || null,
         required_date: form.required_date || null,
         priority: form.priority,
@@ -221,10 +235,29 @@ export default function MaterialRequestsPage() {
 
   const lineCount = (id: string) => (itemsByReq[id] || []).length;
 
+  const projectLabel = (id: string | null) => {
+    const p = projects.find((x) => x.id === id);
+    if (!p) return '—';
+    return p.code ? `${p.code} · ${p.name}` : p.name;
+  };
+
   const columns: Column<MaterialRequest>[] = [
     { key: 'request_number', label: 'Request', render: (r) => <span className="font-medium">{r.request_number}</span> },
     { key: 'requested_by', label: 'Requested By', render: (r) => (r.requested_by ? employeeNames[r.requested_by] || '—' : '—') },
     { key: 'warehouse', label: 'Warehouse', render: (r) => r.warehouse?.name || '—' },
+    {
+      key: 'usage_category',
+      label: 'Usage',
+      render: (r) => (
+        <div className="flex flex-col">
+          <span>{usageLabel(r.usage_category)}</span>
+          {r.usage_category === 'PROJECT' && r.project_id && (
+            <span className="text-xs text-muted-foreground">{projectLabel(r.project_id)}</span>
+          )}
+        </div>
+      ),
+      searchText: (r) => [usageLabel(r.usage_category), r.project_id ? projectLabel(r.project_id) : ''],
+    },
     { key: 'items', label: 'Items', render: (r) => lineCount(r.id), searchable: false },
     { key: 'required_date', label: 'Required', render: (r) => fmtDate(r.required_date) },
     { key: 'priority', label: 'Priority', render: (r) => <Badge variant="outline">{r.priority}</Badge> },
@@ -277,6 +310,32 @@ export default function MaterialRequestsPage() {
                   <SelectContent>
                     <SelectItem value="__none__">None</SelectItem>
                     {departments.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>Usage category *</Label>
+                <Select value={form.usage_category || '__none__'} onValueChange={(v) => setForm({ ...form, usage_category: v === '__none__' ? '' : v, project_id: v === 'PROJECT' ? form.project_id : '' })}>
+                  <SelectTrigger><SelectValue placeholder="Select usage" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">Select…</SelectItem>
+                    {MATERIAL_USAGE_CATEGORIES.map((u) => <SelectItem key={u.value} value={u.value}>{u.label}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Project {form.usage_category === 'PROJECT' ? '*' : ''}</Label>
+                <Select
+                  value={form.project_id || '__none__'}
+                  onValueChange={(v) => setForm({ ...form, project_id: v === '__none__' ? '' : v })}
+                  disabled={form.usage_category !== 'PROJECT'}
+                >
+                  <SelectTrigger><SelectValue placeholder={form.usage_category === 'PROJECT' ? 'Select project' : 'Only for project usage'} /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">None</SelectItem>
+                    {projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.code ? `${p.code} · ` : ''}{p.name}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
@@ -373,6 +432,10 @@ export default function MaterialRequestsPage() {
               <div className="grid gap-2 text-sm sm:grid-cols-2">
                 <p>Requested by: <span className="font-medium">{detailRow.requested_by ? employeeNames[detailRow.requested_by] || '—' : '—'}</span></p>
                 <p>Required: <span className="font-medium">{fmtDate(detailRow.required_date)}</span></p>
+                <p>Usage: <span className="font-medium">{usageLabel(detailRow.usage_category)}</span></p>
+                {detailRow.usage_category === 'PROJECT' && (
+                  <p>Project: <span className="font-medium">{projectLabel(detailRow.project_id)}</span></p>
+                )}
                 {detailRow.purpose && <p>Purpose: <span className="font-medium">{detailRow.purpose}</span></p>}
                 {detailRow.issued_at && <p>Issued: <span className="font-medium">{fmtDate(detailRow.issued_at)}</span></p>}
               </div>

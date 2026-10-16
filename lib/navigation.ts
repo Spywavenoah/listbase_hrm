@@ -264,6 +264,8 @@ export const navSections: NavSection[] = [
       { label: 'Company Profile', href: '/settings/company', icon: Building2, privilege: 'admin.settings' },
       { label: 'Payments', href: '/settings/payments', icon: CreditCard, privilege: 'admin.settings' },
       { label: 'Email (SMTP)', href: '/settings/smtp', icon: Mail, privilege: 'admin.settings' },
+      { label: 'WhatsApp Attendance', href: '/settings/whatsapp', icon: MessageSquare, privilege: 'admin.settings' },
+      { label: 'Attendance Geofences', href: '/settings/attendance-geofence', icon: MapPin, privileges: ['attendance.manage', 'admin.settings'] },
       { label: 'Mail Templates', href: '/settings/templates', icon: FileText, privilege: 'admin.settings' },
       { label: 'Email Queue', href: '/settings/email-queue', icon: Send, privilege: 'admin.settings' },
       { label: 'Field Builder', href: '/settings/fields', icon: Wrench, privilege: 'admin.settings' },

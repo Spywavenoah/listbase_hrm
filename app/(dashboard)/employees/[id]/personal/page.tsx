@@ -88,6 +88,7 @@ export default function PersonalPage() {
     last_name: '',
     email: '',
     phone: '',
+    secondary_phone: '',
     date_of_birth: '',
     gender: '',
     marital_status: '',
@@ -148,6 +149,7 @@ export default function PersonalPage() {
           last_name: d.last_name || '',
           email: d.email || '',
           phone: d.phone || '',
+          secondary_phone: d.secondary_phone || '',
           date_of_birth: d.date_of_birth || '',
           gender: d.gender || '',
           marital_status: d.marital_status || '',
@@ -245,6 +247,7 @@ export default function PersonalPage() {
           last_name: form.last_name,
           email: form.email,
           phone: form.phone,
+          secondary_phone: form.secondary_phone || null,
           date_of_birth: form.date_of_birth || null,
           gender: form.gender || null,
           marital_status: form.marital_status || null,
@@ -338,6 +341,15 @@ export default function PersonalPage() {
               <Label>Phone</Label>
               <Input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
             </div>
+          </div>
+
+          <div className="space-y-1.5 sm:max-w-xs">
+            <Label>Secondary phone</Label>
+            <Input
+              value={form.secondary_phone}
+              onChange={(e) => setForm({ ...form, secondary_phone: e.target.value })}
+              placeholder="Alternate / WhatsApp number"
+            />
           </div>
 
           <div className="grid gap-4 sm:grid-cols-3">

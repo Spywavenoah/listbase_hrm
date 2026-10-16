@@ -179,7 +179,7 @@ export default function AddEmployeePage() {
 
   const [form, setForm] = useState({
     personal: {
-      employee_id: '', first_name: '', last_name: '', email: '', phone: '',
+      employee_id: '', first_name: '', last_name: '', email: '', phone: '', secondary_phone: '',
       gender: '', date_of_birth: '', marital_status: '', nationality: '',
       state_of_origin: '', lga: '', residential_address: '', permanent_address: '',
       city: '', state: '', country: '', postal_code: '',
@@ -304,6 +304,7 @@ export default function AddEmployeePage() {
           last_name: p.last_name.trim(),
           email: p.email.trim(),
           phone: str(p.phone),
+          secondary_phone: str(p.secondary_phone),
           gender: str(p.gender),
           date_of_birth: p.date_of_birth || null,
           marital_status: str(p.marital_status),
@@ -476,6 +477,10 @@ export default function AddEmployeePage() {
             <Input type="email" value={field('email')} onChange={(e) => set('email', e.target.value)} /></div>
           <div className="space-y-1.5"><Label>Phone</Label>
             <Input value={field('phone')} onChange={(e) => set('phone', e.target.value)} /></div>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5"><Label>Secondary phone</Label>
+            <Input value={field('secondary_phone')} onChange={(e) => set('secondary_phone', e.target.value)} placeholder="Alternate / WhatsApp number" /></div>
         </div>
         <div className="grid gap-4 sm:grid-cols-3">
           <div className="space-y-1.5"><Label>Date of Birth</Label>
