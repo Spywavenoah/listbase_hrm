@@ -38,6 +38,9 @@ import {
   Tags,
   Car,
   Fuel,
+  FolderKanban,
+  MapPin,
+  Coins,
 } from 'lucide-react';
 
 export interface NavItem {
@@ -91,6 +94,12 @@ export const ALL_ASSET_PRIVILEGES: string[] = [
   'assets.fleet',
   'assets.maintenance',
   'assets.request',
+];
+
+export const ALL_PROJECT_PRIVILEGES: string[] = [
+  'projects.view',
+  'projects.manage',
+  'projects.allowance',
 ];
 
 export const navSections: NavSection[] = [
@@ -226,6 +235,16 @@ export const navSections: NavSection[] = [
       { label: 'Warehouses', href: '/inventory/warehouses', icon: Warehouse, privileges: ['inventory.manage', 'inventory.settings'] },
       { label: 'Categories', href: '/inventory/categories', icon: Tags, privileges: ['inventory.manage', 'inventory.settings'] },
       { label: 'Reports', href: '/inventory/reports', icon: ChartBar, privileges: ['inventory.view', 'inventory.manage'] },
+    ],
+  },
+  {
+    label: 'Projects',
+    icon: FolderKanban,
+    items: [
+      { label: 'Projects', href: '/projects', icon: MapPin, privileges: ALL_PROJECT_PRIVILEGES },
+      { label: 'Workforce', href: '/projects/workforce', icon: Users, privileges: ALL_PROJECT_PRIVILEGES },
+      { label: 'Offshore Allowance', href: '/projects/allowances', icon: Coins, privileges: ALL_PROJECT_PRIVILEGES },
+      { label: 'Offshore Report', href: '/projects/reports', icon: ChartBar, privileges: ALL_PROJECT_PRIVILEGES },
     ],
   },
   {

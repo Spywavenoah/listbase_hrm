@@ -130,6 +130,15 @@ export const PRIVILEGE_CATEGORIES: PrivilegeCategory[] = [
     ],
   },
   {
+    key: 'projects',
+    label: 'Projects',
+    privileges: [
+      { key: 'projects.view', label: 'View projects', description: 'Read projects, workforce deployments and offshore reports' },
+      { key: 'projects.manage', label: 'Manage projects', description: 'Create and edit projects, manage workforce and shuffles' },
+      { key: 'projects.allowance', label: 'Manage offshore allowances', description: 'Configure offshore allowance rates and defaults' },
+    ],
+  },
+  {
     key: 'admin',
     label: 'Admin & System',
     privileges: [

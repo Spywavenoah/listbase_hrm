@@ -41,6 +41,12 @@ const ALL_ASSET_PRIVILEGES: string[] = [
   'assets.request',
 ];
 
+const ALL_PROJECT_PRIVILEGES: string[] = [
+  'projects.view',
+  'projects.manage',
+  'projects.allowance',
+];
+
 interface Rule {
   re: RegExp;
   guard?: RouteGuard;
@@ -106,6 +112,9 @@ const RULES: Rule[] = [
   { re: /^\/inventory\/transfers/, guard: { anyPrivilege: ['inventory.move', 'inventory.manage'] } },
   { re: /^\/inventory\/reports/, guard: { anyPrivilege: ['inventory.view', 'inventory.manage'] } },
   { re: /^\/inventory(\/|$)/, guard: { anyPrivilege: ALL_INVENTORY_PRIVILEGES } },
+  { re: /^\/projects\/allowances/, guard: { anyPrivilege: ['projects.allowance', 'projects.manage'] } },
+  { re: /^\/projects\/reports/, guard: { anyPrivilege: ALL_PROJECT_PRIVILEGES } },
+  { re: /^\/projects(\/|$)/, guard: { anyPrivilege: ALL_PROJECT_PRIVILEGES } },
   { re: /^\/reports\/builder/, guard: { anyPrivilege: ['admin.reports', 'admin.reports_write'] } },
   { re: /^\/reports(\/|$)/, guard: { anyPrivilege: ['admin.reports', 'admin.reports_read'] } },
   { re: /^\/settings\/access/, guard: { privilege: 'admin.privileges' } },
