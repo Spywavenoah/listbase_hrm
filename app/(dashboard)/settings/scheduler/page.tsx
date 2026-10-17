@@ -51,6 +51,7 @@ const jobTypes = [
   { value: 'ONBOARDING_FOLLOWUP', label: 'Onboarding follow-up' },
   { value: 'TRAINING_REMINDER', label: 'Training reminder' },
   { value: 'TRAINING_RENEWAL', label: 'Training certificate renewal' },
+  { value: 'TRAINING_REMINDERS', label: 'Training reminders & overdue actions' },
   { value: 'TRIAL_MILESTONE', label: 'Trial milestone (30/60/90)' },
   { value: 'CUSTOM', label: 'Custom reminder' },
 ];

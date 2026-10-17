@@ -24,6 +24,10 @@ interface Enrollment {
   certificate_expires_at: string | null;
   certificate_pdf_url: string | null;
   cycle: number;
+  due_date: string | null;
+  reminder_sent_at: string | null;
+  overdue_action_at: string | null;
+  overdue_action_result: string | null;
 }
 
 type RenewalBadge = { label: string; cls: string };
@@ -108,6 +112,22 @@ export default function EnrollmentsPage() {
     {
       key: 'enrolled_at', label: 'Enrolled',
       render: (e) => e.enrolled_at ? new Date(e.enrolled_at).toLocaleDateString() : '—',
+    },
+    {
+      key: 'due_date', label: 'Due',
+      searchText: (e) => [e.due_date || ''],
+      render: (e) => {
+        if (!e.due_date) return <span className="text-muted-foreground">—</span>;
+        const due = new Date(e.due_date);
+        const days = Math.ceil((due.getTime() - Date.now()) / 86400000);
+        const done = e.status === 'COMPLETED';
+        let cls = 'bg-info/10 text-info';
+        let label = due.toLocaleDateString();
+        if (!done && days < 0) cls = 'bg-destructive/10 text-destructive';
+        else if (!done && days === 0) { cls = 'bg-destructive/10 text-destructive'; label = 'Today'; }
+        else if (!done && days <= 7) { cls = 'bg-warning/10 text-warning'; label = `${days}d left`; }
+        return <Badge variant="outline" className={cls}>{label}</Badge>;
+      },
     },
     {
       key: 'completed_at', label: 'Completed',

@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Users, UserPlus, CalendarDays, Wallet, Clock, Package, CheckCircle2, Circle, ArrowRight, AlertCircle, Settings2 } from 'lucide-react';
+import { Users, UserPlus, CalendarDays, Wallet, Clock, Package, CheckCircle2, Circle, ArrowRight, AlertCircle, Settings2, GraduationCap } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { cn } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
@@ -136,6 +136,51 @@ export default function DashboardPage() {
     loadStats();
   }, [showOrgStats]);
 
+  // Run the training reminder cycle, then surface unread training alerts as a popup.
+  const [trainingAlerts, setTrainingAlerts] = useState<
+    { id: string; title: string; message: string; type: string; created_at: string }[]
+  >([]);
+  const [trainingAlertOpen, setTrainingAlertOpen] = useState(false);
+  const [trainingAlertsChecked, setTrainingAlertsChecked] = useState(false);
+
+  useEffect(() => {
+    if (!currentUser || trainingAlertsChecked) return;
+    setTrainingAlertsChecked(true);
+    let cancelled = false;
+    (async () => {
+      await supabase.rpc('training_send_reminders').then(() => {}, () => {});
+      try {
+        const { data, error } = await supabase
+          .from('notifications')
+          .select('id, title, message, type, created_at, metadata')
+          .eq('is_read', false)
+          .order('created_at', { ascending: false })
+          .limit(50);
+        if (error) throw error;
+        if (cancelled) return;
+        const training = (data || []).filter((n) => {
+          const kind = (n.metadata as { kind?: string } | null)?.kind;
+          return typeof kind === 'string' && kind.startsWith('training_');
+        });
+        setTrainingAlerts(training);
+        if (training.length > 0) setTrainingAlertOpen(true);
+      } catch {
+        // notifications are non-critical
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentUser, trainingAlertsChecked]);
+
+  const dismissTrainingAlerts = async (goToTraining: boolean) => {
+    setTrainingAlertOpen(false);
+    const ids = trainingAlerts.map((a) => a.id);
+    setTrainingAlerts([]);
+    if (ids.length > 0) {
+      await supabase.from('notifications').update({ is_read: true }).in('id', ids).then(() => {}, () => {});
+    }
+    if (goToTraining) router.push('/training/enrollments');
+  };
+
   const summaryCards = [
     { label: 'Total Employees', value: stats.totalEmployees, icon: Users, color: 'primary' as const },
     { label: 'Pending Onboarding', value: stats.pendingOnboarding, icon: UserPlus, color: 'warning' as const },
@@ -250,6 +295,34 @@ export default function DashboardPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setCustomizeOpen(false)}>Cancel</Button>
             <Button onClick={saveCustomize}>Save</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={trainingAlertOpen} onOpenChange={(o) => { if (!o) void dismissTrainingAlerts(false); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <GraduationCap className="h-5 w-5 text-primary" />
+              Training alerts
+            </DialogTitle>
+          </DialogHeader>
+          <div className="max-h-80 space-y-3 overflow-y-auto py-1">
+            {trainingAlerts.map((a) => (
+              <div key={a.id} className="rounded-lg border border-border p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="text-sm font-semibold">{a.title}</p>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {new Date(a.created_at).toLocaleDateString()}
+                  </span>
+                </div>
+                <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{a.message}</p>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => void dismissTrainingAlerts(false)}>Later</Button>
+            <Button onClick={() => void dismissTrainingAlerts(true)}>Go to Training</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
