@@ -274,7 +274,6 @@ export default function DashboardPage() {
                   </div>
                   <p className="mt-3 text-2xl font-bold">{valueMap[card.label] || card.value}</p>
                   <p className="text-xs sm:text-sm text-muted-foreground">{card.label}</p>
-                  <p className="mt-0.5 text-xs font-medium {card.trendColor}">{card.trend}</p>
                 </CardContent>
               </Card>
             );
@@ -290,7 +289,11 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {show('org_charts') && <DashboardCharts className="reveal" />}
+      {show('org_charts') && (
+        <div className="reveal">
+          <DashboardCharts />
+        </div>
+      )}
 
       <Dialog open={customizeOpen} onOpenChange={setCustomizeOpen}>
         <DialogContent>
