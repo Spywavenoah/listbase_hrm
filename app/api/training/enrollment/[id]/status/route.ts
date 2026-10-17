@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase/server';
 import { newSessionId, signProgressToken, verifyEmployeeAuth } from '@/lib/training/auth';
-import { canInspect, evaluate, getEnforcement, loadEnrollment, renewalDaysLeft } from '@/lib/training/server';
+import { canInspect, courseVideoUrl, evaluate, getEnforcement, hasCourseVideo, loadEnrollment, renewalDaysLeft } from '@/lib/training/server';
 import { coveragePct } from '@/lib/training/segments';
 import { HEARTBEAT_INTERVAL_MS, type CompletionState, type EnforcementMode } from '@/lib/training/constants';
 import type { CertificateInfo, CompletionEvaluation } from '@/lib/training/types';
 
 export const runtime = 'nodejs';
-
-function hasVideo(course: Record<string, unknown>): boolean {
-  return Boolean(course.video_url) && Number(course.video_duration_seconds || 0) > 0;
-}
 
 export async function GET(
   request: NextRequest,
@@ -31,7 +27,7 @@ export async function GET(
   const course = ctx.course;
   const progress = ctx.progress;
   const enforcement: EnforcementMode = await getEnforcement(db);
-  const video = hasVideo(course);
+  const video = hasCourseVideo(course);
   const validationEnabled = ctx.enrollment.validation_enabled !== false;
   const courseEnforced = course.completion_enforced !== false;
   const enforced = enforcement === 'ENFORCED' && video && validationEnabled && courseEnforced;
@@ -70,7 +66,7 @@ export async function GET(
     progressPct: pct,
     resumePosition: Number(progress?.last_position_seconds || 0),
     durationSeconds: duration,
-    videoUrl: (course.video_url as string) || null,
+    videoUrl: courseVideoUrl(db, course),
     passPct: Number(course.pass_pct || 95),
     renewalMonths: (course.renewal_months as number) ?? null,
     enforcement,

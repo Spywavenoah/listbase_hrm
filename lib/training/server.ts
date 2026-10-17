@@ -5,6 +5,7 @@ import {
   DEFAULT_HEARTBEAT_INTERVAL_SEC,
   DEFAULT_PASS_PCT,
   TRAINING_SETTINGS_GROUP,
+  VIDEO_BUCKET,
   type EnforcementMode,
 } from './constants';
 import { coveragePct, coverageSeconds, mergeSegments, normalizeSegments } from './segments';
@@ -100,6 +101,22 @@ function durationFor(course: Record<string, unknown>, observed: number | null): 
   if (configured > 0) return configured;
   if (observed && observed > 0) return observed;
   return 0;
+}
+
+/** A course has a verifiable lesson when it has a source (upload or URL) and a known duration. */
+export function hasCourseVideo(course: Record<string, unknown>): boolean {
+  const hasSource = Boolean(course.video_path) || Boolean(course.video_url);
+  return hasSource && Number(course.video_duration_seconds || 0) > 0;
+}
+
+/** Resolve the playable lesson URL: uploaded object first, then the legacy URL. */
+export function courseVideoUrl(db: Db, course: Record<string, unknown>): string | null {
+  const path = (course.video_path as string) || '';
+  if (path) {
+    const { data } = db.storage.from(VIDEO_BUCKET).getPublicUrl(path);
+    if (data?.publicUrl) return data.publicUrl;
+  }
+  return (course.video_url as string) || null;
 }
 
 export interface ApplyResult {

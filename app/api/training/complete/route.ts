@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase/server';
 import { verifyEmployeeAuth, verifyProgressToken } from '@/lib/training/auth';
-import { canInspect, getEnforcement, issueCertificate, loadEnrollment, renewalDaysLeft } from '@/lib/training/server';
+import { canInspect, getEnforcement, hasCourseVideo, issueCertificate, loadEnrollment, renewalDaysLeft } from '@/lib/training/server';
 import type { CompletionEvaluation } from '@/lib/training/types';
 
 export const runtime = 'nodejs';
@@ -9,10 +9,6 @@ export const runtime = 'nodejs';
 interface CompleteBody {
   enrollmentId?: string;
   token?: string;
-}
-
-function hasVideo(course: Record<string, unknown>): boolean {
-  return Boolean(course.video_url) && Number(course.video_duration_seconds || 0) > 0;
 }
 
 export async function POST(request: NextRequest) {
@@ -45,7 +41,7 @@ export async function POST(request: NextRequest) {
   }
 
   const course = ctx.course;
-  const video = hasVideo(course);
+  const video = hasCourseVideo(course);
   const enforcement = await getEnforcement(db);
   const validationEnabled = ctx.enrollment.validation_enabled !== false;
   const courseEnforced = course.completion_enforced !== false;

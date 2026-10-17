@@ -8,6 +8,7 @@ export const EXPECTED_HEARTBEAT_RATIO = 0.9;
 export const DEFAULT_HEARTBEAT_INTERVAL_SEC = HEARTBEAT_INTERVAL_MS / 1000;
 
 export const CERT_BUCKET = 'certification-documents';
+export const VIDEO_BUCKET = 'training-videos';
 export const TRAINING_SETTINGS_GROUP = 'training';
 export const COMPLETION_ENFORCEMENT_KEY = 'completion_enforcement';
 export const PROGRESS_TOKEN_PURPOSE = 'training.progress';
