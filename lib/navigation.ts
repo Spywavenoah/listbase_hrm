@@ -186,7 +186,6 @@ export const navSections: NavSection[] = [
       { label: 'My Training', href: '/training/my', icon: GraduationCap, privilege: 'training.enroll' },
       { label: 'Courses', href: '/training', icon: GraduationCap, privilege: 'training.manage' },
       { label: 'Certifications', href: '/training/certifications', icon: Award, privilege: 'training.manage' },
-      { label: 'Competencies', href: '/training/competencies', icon: BookMarked, privilege: 'training.manage' },
     ],
   },
   {
