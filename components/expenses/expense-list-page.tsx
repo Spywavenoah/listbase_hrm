@@ -149,6 +149,9 @@ export default function ExpenseListPage({
     setLoading(true);
     try {
       let claimQuery = supabase.from('expense_claims').select('*').eq('kind', 'CLAIM');
+      if (!isApprover && employee?.id) {
+        claimQuery = claimQuery.eq('requested_by', employee.id);
+      }
       if (isRetirement) claimQuery = claimQuery.in('status', ['APPROVED', 'RETIRED']);
       claimQuery = claimQuery.order('created_at', { ascending: false });
       const [cRes, catRes, empRes] = await Promise.all([
