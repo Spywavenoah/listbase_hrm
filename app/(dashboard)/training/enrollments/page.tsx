@@ -2,14 +2,13 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { ModuleListPage, type SummaryCard, type Column } from '@/components/shared/module-list-page';
-import { UserPlus, CheckCircle, Clock, GraduationCap, Play, Award } from 'lucide-react';
+import { UserPlus, CheckCircle, Clock, GraduationCap, Award } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { VideoPlayer } from '@/components/training/video-player';
 import { toast } from 'sonner';
 
 interface Enrollment {
@@ -28,6 +27,9 @@ interface Enrollment {
   reminder_sent_at: string | null;
   overdue_action_at: string | null;
   overdue_action_result: string | null;
+  quiz_best_score: number | null;
+  quiz_passed: boolean;
+  quiz_attempts: number;
 }
 
 type RenewalBadge = { label: string; cls: string };
@@ -47,7 +49,6 @@ export default function EnrollmentsPage() {
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({ employee_id: '', course_id: '' });
-  const [watchTarget, setWatchTarget] = useState<Enrollment | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -142,6 +143,18 @@ export default function EnrollmentsPage() {
       render: (e) => <Badge variant="outline" className={statusColors[e.status] || ''}>{e.status}</Badge>,
     },
     {
+      key: 'quiz_best_score', label: 'Quiz',
+      searchText: (e) => [e.quiz_best_score != null ? String(e.quiz_best_score) : ''],
+      render: (e) => {
+        if (e.quiz_best_score == null) return <span className="text-muted-foreground">—</span>;
+        return (
+          <Badge variant="outline" className={e.quiz_passed ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}>
+            {Math.round(e.quiz_best_score)}%{e.quiz_attempts > 1 ? ` · ${e.quiz_attempts} tries` : ''}
+          </Badge>
+        );
+      },
+    },
+    {
       key: 'certificate_id', label: 'Certificate',
       searchText: (e) => [e.certificate_id || ''],
       render: (e) => e.certificate_id
@@ -176,24 +189,13 @@ export default function EnrollmentsPage() {
     <>
       <ModuleListPage
         title="Training Enrollments"
-        description="Manage course enrollments and completion tracking"
+        description="Read-only compliance view of course enrollments and completion tracking"
         summaryCards={summaryCards}
         columns={columns}
         data={enrollments}
         searchPlaceholder="Search enrollments..."
         createLabel="Enroll Employee"
         onCreate={() => setCreateOpen(true)}
-        rowActions={(e) => (
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 text-primary"
-            onClick={() => setWatchTarget(e)}
-          >
-            <Play className="mr-1 h-3 w-3" />
-            {e.status === 'COMPLETED' ? 'View' : 'Watch'}
-          </Button>
-        )}
       />
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
@@ -222,23 +224,6 @@ export default function EnrollmentsPage() {
             <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
             <Button onClick={handleCreate} disabled={!form.employee_id || !form.course_id}>Enroll</Button>
           </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={!!watchTarget} onOpenChange={(o) => { if (!o) setWatchTarget(null); }}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>
-              {watchTarget ? courseTitle(watchTarget.course_id) : 'Training lesson'}
-            </DialogTitle>
-          </DialogHeader>
-          {watchTarget && (
-            <VideoPlayer
-              key={watchTarget.id}
-              enrollmentId={watchTarget.id}
-              onCompleted={() => { load(); }}
-            />
-          )}
         </DialogContent>
       </Dialog>
     </>

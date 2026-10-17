@@ -72,6 +72,7 @@ export const PRIVILEGE_CATEGORIES: PrivilegeCategory[] = [
     label: 'Training',
     privileges: [
       { key: 'training.manage', label: 'Manage training', description: 'Manage courses and enrollments' },
+      { key: 'training.enroll', label: 'Enrol in training', description: 'Self-enrol into courses and complete your own training' },
     ],
   },
   {
@@ -161,7 +162,15 @@ export const SELF_SERVICE_PRIVILEGE = {
   description: 'Default access to own profile, self-service and onboarding',
 } as const;
 
-export const DEFAULT_PRIVILEGE_KEYS: string[] = [SELF_SERVICE_PRIVILEGE.key];
+export const DEFAULT_PRIVILEGE_KEYS: string[] = [
+  SELF_SERVICE_PRIVILEGE.key,
+  // Self-service bundle granted to every employee (kept in sync with the
+  // grant_default_privileges() function in migration 19).
+  'training.enroll',
+  'assets.request',
+  'inventory.request',
+  'procurement.requisition_create',
+];
 
 export const ROLE_OPTIONS = [
   { value: 'EMPLOYEE', label: 'Employee' },

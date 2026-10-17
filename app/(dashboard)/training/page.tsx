@@ -2,11 +2,12 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { ModuleListPage, type SummaryCard, type Column } from '@/components/shared/module-list-page';
-import { GraduationCap, BookOpen, Award, Users, Upload, Video, X, ClipboardCheck } from 'lucide-react';
+import { GraduationCap, BookOpen, Award, Users, Upload, Video, X, ClipboardCheck, UsersRound } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { AssessmentDialog } from '@/components/training/assessment-dialog';
+import { AssignCourseDialog, type Course as AssignCourse } from '@/components/training/assign-course-dialog';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -143,6 +144,7 @@ export default function TrainingPage() {
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [assessmentCourse, setAssessmentCourse] = useState<{ id: string; title: string; hasVideo: boolean } | null>(null);
+  const [assignCourse, setAssignCourse] = useState<AssignCourse | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -411,15 +413,26 @@ export default function TrainingPage() {
         onCreate={() => { setEditing(null); setForm({ ...emptyForm }); setCreateOpen(true); }}
         onEdit={(c) => { setEditing(c); setForm(toForm(c)); setCreateOpen(true); }}
         rowActions={(c) => (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            title="End-of-video assessment"
-            onClick={() => setAssessmentCourse({ id: c.id, title: c.title, hasVideo: Boolean(c.video_path || c.video_url) })}
-          >
-            <ClipboardCheck className="h-4 w-4" />
-          </Button>
+          <>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              title="Assign to employees"
+              onClick={() => setAssignCourse({ id: c.id, title: c.title })}
+            >
+              <UsersRound className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              title="End-of-video assessment"
+              onClick={() => setAssessmentCourse({ id: c.id, title: c.title, hasVideo: Boolean(c.video_path || c.video_url) })}
+            >
+              <ClipboardCheck className="h-4 w-4" />
+            </Button>
+          </>
         )}
         toolbarActions={
           <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
@@ -592,6 +605,12 @@ export default function TrainingPage() {
         onOpenChange={(o) => { if (!o) setAssessmentCourse(null); }}
         course={assessmentCourse}
         onChanged={load}
+      />
+      <AssignCourseDialog
+        open={Boolean(assignCourse)}
+        onOpenChange={(o) => { if (!o) setAssignCourse(null); }}
+        course={assignCourse}
+        onAssigned={load}
       />
     </>
   );

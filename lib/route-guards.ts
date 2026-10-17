@@ -80,7 +80,7 @@ const RULES: Rule[] = [
   { re: /^\/payroll\/components/, guard: { privilege: 'payroll.settings' } },
   { re: /^\/payroll\/payslips/, guard: { anyPrivilege: ['payroll.manage', 'payroll.settings'] } },
   { re: /^\/performance(\/|$)/, guard: { privilege: 'performance.manage' } },
-  { re: /^\/training(\/|$)/, guard: { privilege: 'training.manage' } },
+  { re: /^\/training(\/|$)/, guard: { anyPrivilege: ['training.manage', 'training.enroll'] } },
   { re: /^\/assets\/categories/, guard: { anyPrivilege: ['assets.manage', 'assets.view'] } },
   { re: /^\/assets\/repairs/, guard: { anyPrivilege: ['assets.repairs', 'assets.manage', 'assets.view'] } },
   { re: /^\/assets\/fuel/, guard: { anyPrivilege: ['assets.fleet', 'assets.manage', 'assets.view'] } },

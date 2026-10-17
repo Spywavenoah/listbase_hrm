@@ -63,17 +63,14 @@ export async function getEnforcement(db: Db): Promise<EnforcementMode> {
   return parseSetting(data?.value) === 'ENFORCED' ? 'ENFORCED' : 'SHADOW';
 }
 
+/**
+ * Consumption guard: only the enrollment OWNER may watch, heartbeat, quiz or
+ * complete an enrollment. Admins explicitly may NOT act on someone else's
+ * enrollment (they retain read-only compliance visibility via the Enrollments
+ * page, which reads the table directly under RLS).
+ */
 export async function canInspect(db: Db, employeeId: string, ownerEmployeeId: string): Promise<boolean> {
-  if (employeeId && employeeId === ownerEmployeeId) return true;
-  const { data: emp } = await db.from('employees').select('role').eq('id', employeeId).maybeSingle();
-  if (emp?.role === 'SUPER_ADMIN') return true;
-  const { data: grants } = await db
-    .from('employee_privileges')
-    .select('privilege_key')
-    .eq('employee_id', employeeId)
-    .eq('privilege_key', 'training.manage')
-    .limit(1);
-  return Boolean(grants && grants.length > 0);
+  return Boolean(employeeId && employeeId === ownerEmployeeId);
 }
 
 /** True when the employee may manage training content (super admin or training.manage). */
