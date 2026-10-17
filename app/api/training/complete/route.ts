@@ -60,6 +60,7 @@ export async function POST(request: NextRequest) {
         enforced: shouldEnforce,
         reasons: (result.evaluation as CompletionEvaluation)?.reasons || [],
         evaluation: result.evaluation || null,
+        quiz: result.quiz || null,
       },
       { status: 422 }
     );

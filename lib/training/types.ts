@@ -74,6 +74,36 @@ export interface CertificateInfo {
   cycle: number;
 }
 
+export interface QuizQuestionPublic {
+  id: string;
+  prompt: string;
+  options: string[];
+  position: number;
+}
+
+export interface QuizAdminQuestion extends QuizQuestionPublic {
+  correctIndex: number;
+  explanation: string | null;
+}
+
+export interface QuizSummary {
+  required: boolean;
+  passPct: number;
+  questionCount: number;
+  bestScorePct: number | null;
+  passed: boolean;
+  attempts: number;
+  generationStatus: string;
+  generationError: string | null;
+}
+
+export interface QuizAttemptFeedback {
+  questionId: string;
+  selectedIndex: number | null;
+  correctIndex: number;
+  correct: boolean;
+}
+
 export interface EnrollmentStatus {
   enrollmentId: string;
   courseId: string;
@@ -99,4 +129,5 @@ export interface EnrollmentStatus {
   progressToken: string;
   sessionId: string;
   heartbeatIntervalMs: number;
+  quiz: QuizSummary & { questions: QuizQuestionPublic[] };
 }

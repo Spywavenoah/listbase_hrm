@@ -76,6 +76,20 @@ export async function canInspect(db: Db, employeeId: string, ownerEmployeeId: st
   return Boolean(grants && grants.length > 0);
 }
 
+/** True when the employee may manage training content (super admin or training.manage). */
+export async function canManageTraining(db: Db, employeeId: string): Promise<boolean> {
+  if (!employeeId) return false;
+  const { data: emp } = await db.from('employees').select('role').eq('id', employeeId).maybeSingle();
+  if (emp?.role === 'SUPER_ADMIN') return true;
+  const { data: grants } = await db
+    .from('employee_privileges')
+    .select('privilege_key')
+    .eq('employee_id', employeeId)
+    .eq('privilege_key', 'training.manage')
+    .limit(1);
+  return Boolean(grants && grants.length > 0);
+}
+
 export async function loadEnrollment(db: Db, enrollmentId: string): Promise<EnrollmentContext | null> {
   const { data, error } = await db
     .from('training_enrollments')
@@ -261,6 +275,7 @@ export interface IssueResult {
   cycle?: number;
   evaluation?: CompletionEvaluation;
   skippedValidation?: boolean;
+  quiz?: Record<string, unknown>;
 }
 
 export async function issueCertificate(
@@ -290,6 +305,7 @@ export async function issueCertificate(
       message: res.message ? String(res.message) : 'Completion criteria are not met.',
       evaluation,
       skippedValidation: effectiveSkip,
+      quiz: (res.quiz as Record<string, unknown>) || undefined,
     };
   }
 

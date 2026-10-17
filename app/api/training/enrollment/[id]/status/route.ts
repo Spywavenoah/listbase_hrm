@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase/server';
 import { newSessionId, signProgressToken, verifyEmployeeAuth } from '@/lib/training/auth';
 import { canInspect, courseVideoUrl, evaluate, getEnforcement, hasCourseVideo, loadEnrollment, renewalDaysLeft } from '@/lib/training/server';
+import { getQuizCourseSummary, loadQuizQuestions } from '@/lib/training/quiz-server';
 import { coveragePct } from '@/lib/training/segments';
 import { HEARTBEAT_INTERVAL_MS, type CompletionState, type EnforcementMode } from '@/lib/training/constants';
-import type { CertificateInfo, CompletionEvaluation } from '@/lib/training/types';
+import type { CertificateInfo, CompletionEvaluation, QuizQuestionPublic } from '@/lib/training/types';
 
 export const runtime = 'nodejs';
 
@@ -54,6 +55,26 @@ export async function GET(
     cycle: Number(ctx.enrollment.cycle || 1),
   };
 
+  const quizConfig = await getQuizCourseSummary(db, String(ctx.enrollment.course_id || ''));
+  const quizPassed = ctx.enrollment.quiz_passed === true;
+  let quizQuestions: QuizQuestionPublic[] = [];
+  if (quizConfig.required && !quizPassed && quizConfig.generationStatus === 'READY') {
+    quizQuestions = (await loadQuizQuestions(db, String(ctx.enrollment.course_id || ''), false)) as QuizQuestionPublic[];
+  }
+  const quiz = {
+    required: quizConfig.required,
+    passPct: quizConfig.passPct,
+    questionCount: quizConfig.questionCount,
+    bestScorePct: ctx.enrollment.quiz_best_score === null || ctx.enrollment.quiz_best_score === undefined
+      ? null
+      : Number(ctx.enrollment.quiz_best_score),
+    passed: quizPassed,
+    attempts: Number(ctx.enrollment.quiz_attempts || 0),
+    generationStatus: quizConfig.generationStatus,
+    generationError: quizConfig.generationError,
+    questions: quizQuestions,
+  };
+
   return NextResponse.json({
     enrollmentId: params.id,
     courseId: String(ctx.enrollment.course_id || ''),
@@ -81,5 +102,6 @@ export async function GET(
     progressToken: signProgressToken(params.id, auth.employeeId, sessionId),
     sessionId,
     heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+    quiz,
   });
 }

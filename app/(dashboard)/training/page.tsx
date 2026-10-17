@@ -2,10 +2,11 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { ModuleListPage, type SummaryCard, type Column } from '@/components/shared/module-list-page';
-import { GraduationCap, BookOpen, Award, Users, Upload, Video, X } from 'lucide-react';
+import { GraduationCap, BookOpen, Award, Users, Upload, Video, X, ClipboardCheck } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { AssessmentDialog } from '@/components/training/assessment-dialog';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -38,6 +39,9 @@ interface Course {
   missed_action_config: { message?: string } | null;
   pass_pct: number;
   completion_enforced: boolean;
+  quiz_pass_pct: number;
+  quiz_question_count: number;
+  quiz_generation_status: string;
 }
 
 const emptyForm = {
@@ -138,6 +142,7 @@ export default function TrainingPage() {
   const [strict, setStrict] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [assessmentCourse, setAssessmentCourse] = useState<{ id: string; title: string; hasVideo: boolean } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -366,6 +371,26 @@ export default function TrainingPage() {
       render: (c) => `${completedCount(c.id)}`,
     },
     {
+      key: 'quiz_generation_status', label: 'Assessment',
+      searchText: (c) => [c.quiz_generation_status || ''],
+      render: (c) => {
+        if (c.quiz_generation_status === 'READY') {
+          return (
+            <Badge variant="outline" className="bg-success/10 text-success">
+              {c.quiz_question_count} Q · {c.quiz_pass_pct}%
+            </Badge>
+          );
+        }
+        if (c.quiz_generation_status === 'PENDING') {
+          return <Badge variant="outline" className="bg-info/10 text-info">Generating…</Badge>;
+        }
+        if (c.quiz_generation_status === 'FAILED') {
+          return <Badge variant="outline" className="bg-destructive/10 text-destructive">Failed</Badge>;
+        }
+        return <span className="text-xs text-muted-foreground">None</span>;
+      },
+    },
+    {
       key: 'is_mandatory', label: 'Type',
       render: (c) => <Badge variant="outline" className={c.is_mandatory ? 'bg-warning/10 text-warning' : 'bg-muted text-muted-foreground'}>{c.is_mandatory ? 'Mandatory' : 'Optional'}</Badge>,
     },
@@ -385,6 +410,17 @@ export default function TrainingPage() {
         createLabel="Add Course"
         onCreate={() => { setEditing(null); setForm({ ...emptyForm }); setCreateOpen(true); }}
         onEdit={(c) => { setEditing(c); setForm(toForm(c)); setCreateOpen(true); }}
+        rowActions={(c) => (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            title="End-of-video assessment"
+            onClick={() => setAssessmentCourse({ id: c.id, title: c.title, hasVideo: Boolean(c.video_path || c.video_url) })}
+          >
+            <ClipboardCheck className="h-4 w-4" />
+          </Button>
+        )}
         toolbarActions={
           <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
             <Switch checked={strict} onCheckedChange={(v) => void toggleStrict(v)} />
@@ -551,6 +587,12 @@ export default function TrainingPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <AssessmentDialog
+        open={Boolean(assessmentCourse)}
+        onOpenChange={(o) => { if (!o) setAssessmentCourse(null); }}
+        course={assessmentCourse}
+        onChanged={load}
+      />
     </>
   );
 }

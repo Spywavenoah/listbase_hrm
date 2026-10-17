@@ -1,11 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Play, ShieldCheck, ShieldAlert, Award, RefreshCw, Loader2, Timer } from 'lucide-react';
+import { Play, ShieldCheck, ShieldAlert, Award, RefreshCw, Loader2, Timer, ClipboardCheck, CheckCircle2 } from 'lucide-react';
 import { getEmployeeSession } from '@/lib/supabase/session';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import type { CompletionEvaluation, WatchSegment } from '@/lib/training/types';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { QuizRunner } from '@/components/training/quiz-runner';
+import type { CompletionEvaluation, QuizQuestionPublic, WatchSegment } from '@/lib/training/types';
 
 const MAX_RATE = 1.25;
 const SEGMENT_EPS = 0.05;
@@ -40,6 +42,17 @@ interface StatusResponse {
   progressToken: string;
   sessionId: string;
   heartbeatIntervalMs: number;
+  quiz: {
+    required: boolean;
+    passPct: number;
+    questionCount: number;
+    bestScorePct: number | null;
+    passed: boolean;
+    attempts: number;
+    generationStatus: string;
+    generationError: string | null;
+    questions: QuizQuestionPublic[];
+  };
 }
 
 interface CompleteResponse {
@@ -100,6 +113,7 @@ export function VideoPlayer({ enrollmentId, onCompleted }: VideoPlayerProps) {
   const [daysLeft, setDaysLeft] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [quizOpen, setQuizOpen] = useState(false);
 
   const statusRef = useRef<StatusResponse | null>(null);
   const tokenRef = useRef('');
@@ -263,6 +277,12 @@ export function VideoPlayer({ enrollmentId, onCompleted }: VideoPlayerProps) {
       });
       const data = (await res.json()) as CompleteResponse;
       if (!res.ok || !data.ok) {
+        if (data.code === 'QUIZ_NOT_PASSED') {
+          setNote(data.message || 'Pass the assessment to receive your certificate.');
+          await loadStatus();
+          setQuizOpen(true);
+          return;
+        }
         const why = (data.reasons || []).join(', ');
         setNote(
           data.message
@@ -284,7 +304,14 @@ export function VideoPlayer({ enrollmentId, onCompleted }: VideoPlayerProps) {
     } finally {
       setBusy(false);
     }
-  }, [busy, enrollmentId, onCompleted, sendHeartbeat]);
+  }, [busy, enrollmentId, loadStatus, onCompleted, sendHeartbeat]);
+
+  // ------------------------------------------------------ assessment (quiz)
+  const handleQuizPassed = useCallback(async () => {
+    setQuizOpen(false);
+    await loadStatus();
+    void submitCompletion();
+  }, [loadStatus, submitCompletion]);
 
   // ------------------------------------------------------- video lifecycle
   useEffect(() => {
@@ -311,6 +338,11 @@ export function VideoPlayer({ enrollmentId, onCompleted }: VideoPlayerProps) {
     const onEnded = () => {
       closeSegment();
       markInterrupted();
+      const s = statusRef.current;
+      if (s?.quiz?.required && !s.quiz.passed && (s.quiz.questions?.length || 0) > 0) {
+        setQuizOpen(true);
+        return;
+      }
       void submitCompletion();
     };
     const onRateChange = () => {
@@ -493,6 +525,32 @@ export function VideoPlayer({ enrollmentId, onCompleted }: VideoPlayerProps) {
 
       {note && <p className="text-xs text-muted-foreground">{note}</p>}
 
+      {status.quiz.required && (
+        <div
+          className={
+            status.quiz.passed
+              ? 'flex flex-wrap items-center gap-2 rounded-md border border-success/30 bg-success/5 p-3 text-xs'
+              : 'flex flex-wrap items-center gap-2 rounded-md border border-info/30 bg-info/5 p-3 text-xs'
+          }
+        >
+          {status.quiz.passed ? (
+            <CheckCircle2 className="h-4 w-4 text-success" />
+          ) : (
+            <ClipboardCheck className="h-4 w-4 text-info" />
+          )}
+          <span className="text-muted-foreground">
+            {status.quiz.passed
+              ? `Assessment passed${status.quiz.bestScorePct !== null ? ` · ${status.quiz.bestScorePct}%` : ''}`
+              : `Assessment required — score ${status.quiz.passPct}% or more to be certified`}
+          </span>
+          {!status.quiz.passed && status.quiz.questions.length > 0 && (
+            <Button size="sm" variant="outline" className="ml-auto h-7" onClick={() => setQuizOpen(true)}>
+              Take assessment
+            </Button>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" onClick={() => void submitCompletion()} disabled={busy || issued}>
           {busy ? (
@@ -518,6 +576,28 @@ export function VideoPlayer({ enrollmentId, onCompleted }: VideoPlayerProps) {
           </span>
         )}
       </div>
+
+      <Dialog open={quizOpen} onOpenChange={(o) => { if (!o) setQuizOpen(false); }}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Assessment</DialogTitle>
+            <DialogDescription>
+              {status.quiz.questionCount} question{status.quiz.questionCount === 1 ? '' : 's'} · pass mark{' '}
+              {status.quiz.passPct}%
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            <QuizRunner
+              enrollmentId={enrollmentId}
+              token={tokenRef.current}
+              questions={status.quiz.questions}
+              passPct={status.quiz.passPct}
+              onPassed={() => void handleQuizPassed()}
+              onClose={() => setQuizOpen(false)}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -537,6 +617,8 @@ function describeReason(reason: string, passPct: number): string {
       return 'Playback faster than 1.25× was detected';
     case 'fingerprint_mismatch':
       return 'This lesson was resumed from a different device/session';
+    case 'quiz_passed':
+      return 'Pass the end-of-video assessment to receive your certificate';
     default:
       return reason;
   }
