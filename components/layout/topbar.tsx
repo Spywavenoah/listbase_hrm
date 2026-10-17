@@ -135,11 +135,11 @@ export function Topbar({
   };
 
   return (
-    <header className="flex h-16 items-center gap-3 border-b border-border bg-card px-4 sm:px-6 print:hidden">
-      <Button variant="ghost" size="icon" className="lg:hidden" onClick={onToggleMobile} aria-label="Open menu">
+    <header className="flex h-16 items-center gap-3 border-b border-border/60 bg-card/60 backdrop-blur-md px-4 sm:px-6 print:hidden shadow-sm">
+      <Button variant="ghost" size="icon" className="lg:hidden btn-lift glow-green-hover" onClick={onToggleMobile} aria-label="Open menu">
         <Menu className="h-5 w-5" />
       </Button>
-      <Button variant="ghost" size="icon" className="hidden lg:flex" onClick={onToggleDesktop} aria-label="Toggle sidebar">
+      <Button variant="ghost" size="icon" className="hidden lg:flex btn-lift glow-green-hover" onClick={onToggleDesktop} aria-label="Toggle sidebar">
         {desktopOpen ? <PanelLeftClose className="h-5 w-5" /> : <PanelLeftOpen className="h-5 w-5" />}
       </Button>
 
@@ -147,33 +147,33 @@ export function Topbar({
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           placeholder="Search employees, records, settings..."
-          className="pl-9 bg-background"
+          className="pl-9 bg-accent/50 border border-border focus:ring-primary focus:border-primary"
           aria-label="Search"
         />
       </div>
 
-      <div className="ml-auto flex items-center gap-1">
-        <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="Toggle theme">
+      <div className="ml-auto flex items-center gap-2">
+        <Button variant="ghost" size="icon" className="btn-lift glow-green-hover" onClick={toggleTheme} aria-label="Toggle theme">
           {isDark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
         </Button>
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="relative" aria-label="Notifications">
+            <Button variant="ghost" size="icon" className="relative btn-lift glow-green-hover" aria-label="Notifications">
               <Bell className="h-5 w-5" />
               {unreadCount > 0 && (
-                <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold text-destructive-foreground">
+                <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold text-destructive-foreground shadow-md glow-red">
                   {unreadCount > 9 ? '9+' : unreadCount}
                 </span>
               )}
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-80">
+          <DropdownMenuContent align="end" className="w-80 border border-border bg-card shadow-xl">
             <DropdownMenuLabel className="flex items-center justify-between">
-              <span>Notifications</span>
+              <span className="font-semibold">Notifications</span>
               {unreadCount > 0 && (
                 <button
-                  className="text-xs font-medium text-primary hover:underline"
+                  className="text-xs font-medium text-primary hover:text-primary/80 transition-colors"
                   onClick={(e) => { e.preventDefault(); markAllRead(); }}
                 >
                   Mark all read
@@ -190,11 +190,11 @@ export function Topbar({
                 notifications.map((n) => (
                   <DropdownMenuItem
                     key={n.id}
-                    className="flex-col items-start gap-0.5 py-2 cursor-pointer"
+                    className="flex-col items-start gap-0.5 py-2.5 cursor-pointer transition-colors hover:bg-accent/50"
                     onClick={() => openNotification(n)}
                   >
                     <div className="flex w-full items-center gap-2">
-                      {!n.is_read && <span className="h-2 w-2 shrink-0 rounded-full bg-primary" />}
+                      {!n.is_read && <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-primary pulse-ring" />}
                       <span className={cn('flex-1 truncate text-sm', n.is_read ? 'font-normal' : 'font-semibold')}>
                         {n.title}
                       </span>
@@ -213,7 +213,7 @@ export function Topbar({
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <Button variant="ghost" size="icon" aria-label="Help">
+        <Button variant="ghost" size="icon" className="btn-lift glow-green-hover" aria-label="Help">
           <HelpCircle className="h-5 w-5" />
         </Button>
       </div>

@@ -9,21 +9,24 @@ import { supabase } from '@/lib/supabase/client';
 import { Skeleton } from '@/components/ui/skeleton';
 
 const CHART_COLORS = [
-  'hsl(221 83% 53%)',
-  'hsl(142 71% 45%)',
-  'hsl(38 92% 50%)',
-  'hsl(0 72% 51%)',
-  'hsl(280 65% 60%)',
-  'hsl(199 89% 48%)',
-  'hsl(262 83% 58%)',
+  'hsl(var(--primary))',           /* dark green */
+  'hsl(var(--destructive))',       /* dark red */
+  'hsl(142 70% 40%)',              /* green */
+  'hsl(38 92% 50%)',               /* amber */
+  'hsl(199 89% 48%)',              /* blue */
+  'hsl(280 65% 60%)',              /* purple */
+  'hsl(145 65% 35%)',              /* bright green */
+  'hsl(355 60% 30%)',              /* dark red */
   'hsl(199 89% 48%)',
 ];
 
 const tooltipStyle: React.CSSProperties = {
   backgroundColor: 'hsl(var(--card))',
   border: '1px solid hsl(var(--border))',
-  borderRadius: '8px',
+  borderRadius: '10px',
   fontSize: '12px',
+  padding: '8px 12px',
+  boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1)',
 };
 
 interface ChartCardProps {
@@ -34,9 +37,18 @@ interface ChartCardProps {
 
 function ChartCard({ title, subtitle, children }: ChartCardProps) {
   return (
-    <div className="rounded-xl border bg-card p-6 shadow-sm">
-      <h3 className="text-lg font-semibold">{title}</h3>
-      <p className="text-sm text-muted-foreground">{subtitle}</p>
+    <div className="rounded-xl border bg-card p-6 shadow-sm card-hover">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-lg font-semibold text-gradient-primary">{title}</h3>
+          <p className="text-sm text-muted-foreground">{subtitle}</p>
+        </div>
+        <div className="h-8 w-8 rounded-lg bg-primary/5 flex items-center justify-center text-primary">
+          <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+        </div>
+      </div>
       <div className="mt-4">{children}</div>
     </div>
   );
@@ -137,8 +149,8 @@ export function DashboardCharts() {
               <AreaChart data={headcountData}>
                 <defs>
                   <linearGradient id="headcountGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="hsl(221 83% 53%)" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="hsl(221 83% 53%)" stopOpacity={0} />
+                    <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.35} />
+                    <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -148,7 +160,7 @@ export function DashboardCharts() {
                 <Area
                   type="monotone"
                   dataKey="count"
-                  stroke="hsl(221 83% 53%)"
+                  stroke="hsl(var(--primary))"
                   strokeWidth={2}
                   fill="url(#headcountGradient)"
                   name="Employees"
@@ -206,8 +218,8 @@ export function DashboardCharts() {
                 <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} allowDecimals={false} />
                 <Tooltip contentStyle={tooltipStyle} />
                 <Legend />
-                <Bar dataKey="present" fill="hsl(142 71% 45%)" radius={[4, 4, 0, 0]} name="Present" />
-                <Bar dataKey="absent" fill="hsl(0 72% 51%)" radius={[4, 4, 0, 0]} name="Absent" />
+                <Bar dataKey="present" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} name="Present" />
+                <Bar dataKey="absent" fill="hsl(var(--destructive))" radius={[4, 4, 0, 0]} name="Absent" />
               </BarChart>
             </ResponsiveContainer>
           )}

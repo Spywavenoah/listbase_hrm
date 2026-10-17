@@ -34,10 +34,12 @@ function WidgetCard({
   children: React.ReactNode;
 }) {
   return (
-    <Card className="flex flex-col">
+    <Card className="flex flex-col card-hover border border-border">
       <CardHeader className="flex flex-row items-center justify-between pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
-          <Icon className="h-4 w-4 text-muted-foreground" />
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Icon className="h-4 w-4 float-icon" />
+          </div>
           {title}
         </CardTitle>
         {action}
@@ -83,7 +85,7 @@ export function MyProfileWidget() {
     >
       <div className="space-y-2 text-sm">
         <div className="flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary font-semibold">
+          <div className="flex h-11 w-11 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary/80 text-primary-foreground shadow-lg glow-green">
             {(employee.first_name?.[0] || '') + (employee.last_name?.[0] || '')}
           </div>
           <div>

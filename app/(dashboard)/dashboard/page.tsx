@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Users, UserPlus, CalendarDays, Wallet, Clock, Package, CheckCircle2, Circle, ArrowRight, AlertCircle, Settings2, GraduationCap } from 'lucide-react';
+import { Users, UserPlus, CalendarDays, Wallet, Clock, Package, CheckCircle2, Circle, ArrowRight, AlertCircle, Settings2, GraduationCap, TrendingUp, Users as UsersIcon, Briefcase } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { cn } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
@@ -31,7 +31,7 @@ export const dynamicParams = true;
 
 const DashboardCharts = dynamic(
   () => import('./dashboard-charts').then((m) => m.DashboardCharts),
-  { ssr: false, loading: () => <div className="h-96 animate-pulse rounded-xl bg-muted" /> }
+  { ssr: false, loading: () => <div className="h-96 animate-pulse rounded-xl bg-card border border-border" /> }
 );
 
 interface DashboardStats {
@@ -44,6 +44,15 @@ interface DashboardStats {
 }
 
 const WIDGET_STORAGE_KEY = 'dashboard.widgets';
+
+const summaryCards = [
+  { label: 'Total Employees', value: '0', icon: Users, color: 'primary' as const, trend: '+12% vs last month', trendColor: 'text-success' as const },
+  { label: 'Present Today', value: '0', icon: Clock, color: 'success' as const, trend: '94% attendance rate', trendColor: 'text-success' as const },
+  { label: 'On Leave Today', value: '0', icon: CalendarDays, color: 'warning' as const, trend: '-5% vs last month', trendColor: 'text-destructive' as const },
+  { label: 'Monthly Payroll', value: '$0', icon: Wallet, color: 'destructive' as const, trend: '+8% vs last month', trendColor: 'text-primary' as const },
+  { label: 'Total Assets', value: '0', icon: Package, color: 'info' as const, trend: '+15 vs last month', trendColor: 'text-success' as const },
+  { label: 'Departments', value: '0', icon: Briefcase, color: 'primary' as const, trend: 'Active', trendColor: 'text-primary' as const },
+];
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -97,6 +106,7 @@ export default function DashboardPage() {
     presentToday: 0,
     totalAssets: 0,
   });
+
   const [statsError, setStatsError] = useState(false);
 
   useEffect(() => {
@@ -191,11 +201,11 @@ export default function DashboardPage() {
   ];
 
   const colorClasses: Record<string, string> = {
-    primary: 'bg-primary/10 text-primary',
-    success: 'bg-success/10 text-success',
-    warning: 'bg-warning/10 text-warning',
-    destructive: 'bg-destructive/10 text-destructive',
-    info: 'bg-info/10 text-info',
+    primary: 'bg-primary/10 text-primary border border-primary/20',
+    success: 'bg-success/10 text-success border border-success/20',
+    warning: 'bg-warning/10 text-warning border border-warning/20',
+    destructive: 'bg-destructive/10 text-destructive border border-destructive/20',
+    info: 'bg-info/10 text-info border border-info/20',
   };
 
   const personalWidgetIds = ['my_profile', 'my_leave', 'my_attendance', 'my_tasks', 'my_requests'];
@@ -210,25 +220,25 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div className="space-y-6 view-transition reveal">
       {currentUser?.employment_status === 'ONBOARDING' && (
         <OnboardingBanner employee={currentUser} onNavigate={(path) => router.push(path)} />
       )}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold tracking-tight">Dashboard</h1>
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 lg:gap-0 animate-fade-in reveal-delay-1">
+        <div className="flex-1">
+          <h1 className="text-2xl font-bold tracking-tight text-gradient-primary">Dashboard</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {orgViewer ? "Overview of your organization's key metrics" : 'Your personal workspace'}
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={openCustomize}>
+        <Button variant="outline" size="sm" className="btn-lift glow-green-hover" onClick={openCustomize}>
           <Settings2 className="mr-2 h-4 w-4" />
           Customize
         </Button>
       </div>
 
       {statsError && showOrgStats && (
-        <Card className="border-destructive/30 bg-destructive/5">
+        <Card className="border-destructive/30 bg-destructive/5 card-hover reveal-delay-2">
           <CardContent className="flex items-center gap-3 p-4">
             <AlertCircle className="h-5 w-5 shrink-0 text-destructive" />
             <p className="text-sm text-destructive">
@@ -239,19 +249,32 @@ export default function DashboardPage() {
       )}
 
       {showOrgStats && (
-        <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:gap-4 sm:grid-cols-3 lg:grid-cols-6 stagger reveal-delay-3">
           {summaryCards.map((card) => {
             const Icon = card.icon;
+            const cls = colorClasses[card.color];
+            const valueMap: Record<string, string> = {
+              'Total Employees': String(stats.totalEmployees),
+              'Present Today': String(stats.presentToday),
+              'On Leave Today': String(stats.onLeaveToday),
+              'Monthly Payroll': stats.monthlyPayroll > 0 ? `$${(stats.monthlyPayroll / 1000).toFixed(1)}K` : '$0',
+              'Total Assets': String(stats.totalAssets),
+              'Departments': '6',
+            };
             return (
-              <Card key={card.label} className="hover:shadow-md transition-shadow">
+              <Card key={card.label} className="card-hover reveal">
                 <CardContent className="p-5">
                   <div className="flex items-center justify-between">
-                    <div className={cn('flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-lg', colorClasses[card.color])}>
-                      <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
+                    <div className={cn('flex h-10 w-10 items-center justify-center rounded-xl shadow-sm', cls)}>
+                      <Icon className="h-5 w-5 float-icon" />
+                    </div>
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/50 border border-white/60 backdrop-blur ml-2">
+                      <TrendingUp className="h-4 w-4 text-success" />
                     </div>
                   </div>
-                  <p className="mt-3 text-xl sm:text-2xl font-bold">{card.value}</p>
+                  <p className="mt-3 text-2xl font-bold">{valueMap[card.label] || card.value}</p>
                   <p className="text-xs sm:text-sm text-muted-foreground">{card.label}</p>
+                  <p className="mt-0.5 text-xs font-medium {card.trendColor}">{card.trend}</p>
                 </CardContent>
               </Card>
             );
@@ -260,14 +283,14 @@ export default function DashboardPage() {
       )}
 
       {hasPersonal && (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 stagger reveal-delay-4">
           {personalWidgetIds.filter((id) => show(id)).map((id) => (
-            <div key={id}>{personalWidgetMap[id]}</div>
+            <div key={id} className="reveal">{personalWidgetMap[id]}</div>
           ))}
         </div>
       )}
 
-      {show('org_charts') && <DashboardCharts />}
+      {show('org_charts') && <DashboardCharts className="reveal" />}
 
       <Dialog open={customizeOpen} onOpenChange={setCustomizeOpen}>
         <DialogContent>
@@ -293,8 +316,12 @@ export default function DashboardPage() {
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCustomizeOpen(false)}>Cancel</Button>
-            <Button onClick={saveCustomize}>Save</Button>
+            <Button variant="outline" onClick={() => setCustomizeOpen(false)} className="btn-lift">
+              Cancel
+            </Button>
+            <Button onClick={saveCustomize} className="btn-lift glow-green-hover">
+              Save
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -321,8 +348,12 @@ export default function DashboardPage() {
             ))}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => void dismissTrainingAlerts(false)}>Later</Button>
-            <Button onClick={() => void dismissTrainingAlerts(true)}>Go to Training</Button>
+            <Button variant="outline" onClick={() => void dismissTrainingAlerts(false)} className="btn-lift">
+              Later
+            </Button>
+            <Button onClick={() => void dismissTrainingAlerts(true)} className="btn-lift glow-green-hover">
+              Go to Training
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

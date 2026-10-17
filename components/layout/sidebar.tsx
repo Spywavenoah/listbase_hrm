@@ -135,11 +135,14 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
   return (
     <>
-      <div className="flex h-16 items-center gap-2 border-b border-border px-5">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+      <div className="flex h-16 items-center gap-3 border-b border-border/60 px-5 bg-card/50 backdrop-blur-md">
+        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-primary via-primary/90 to-primary/70 text-primary-foreground shadow-lg glow-green">
           <Building2 className="h-5 w-5" />
         </div>
-        <span className="text-lg font-bold tracking-tight">HR Flow</span>
+        <div className="flex flex-col leading-tight">
+          <span className="text-lg font-bold tracking-tight text-gradient-primary">HR Flow</span>
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground/80 font-medium">Admin Dashboard</span>
+        </div>
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 py-4 scrollbar-thin">
@@ -155,24 +158,24 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
               <button
                 onClick={() => toggleSection(section.label)}
                 className={cn(
-                  'flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                  'flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium transition-all duration-200',
                   hasActiveChild
-                    ? 'bg-accent text-accent-foreground'
-                    : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+                    ? 'bg-gradient-to-r from-primary to-primary/80 text-primary-foreground shadow-md glow-green'
+                    : 'text-muted-foreground/70 hover:bg-accent hover:text-accent-foreground hover:shadow-sm'
                 )}
               >
-                <section.icon className="h-4 w-4 shrink-0" />
+                <section.icon className="h-4 w-4 shrink-0 float-icon" />
                 <span className="flex-1 text-left">{section.label}</span>
                 <ChevronDown
                   className={cn(
-                    'h-4 w-4 shrink-0 transition-transform',
+                    'h-4 w-4 shrink-0 transition-transform duration-200',
                     isOpen && 'rotate-180'
                   )}
                 />
               </button>
 
               {isOpen && (
-                <div className="ml-4 mt-0.5 space-y-0.5 border-l border-border pl-3">
+                <div className="ml-5 mt-1 space-y-0.5">
                   {section.items.map((item) => {
                     const isActive =
                       pathname === item.href ||
@@ -184,14 +187,19 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
                         href={item.href}
                         onClick={onNavigate}
                         className={cn(
-                          'flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors',
+                          'flex items-center gap-2.5 rounded-lg px-3 py-1.75 text-sm transition-all duration-200',
                           isActive
-                            ? 'bg-primary text-primary-foreground font-medium'
-                            : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+                            ? 'bg-primary text-primary-foreground font-medium shadow-sm glow-green'
+                            : 'text-muted-foreground/60 hover:bg-accent/50 hover:text-accent-foreground hover:-translate-x-1'
                         )}
                       >
                         <item.icon className="h-3.5 w-3.5 shrink-0" />
                         {item.label}
+                        {item.badge && (
+                          <span className="ml-auto h-6 min-w-6 rounded-full bg-destructive text-destructive-foreground text-[10px] font-bold flex items-center justify-center px-1.5">
+                            {item.badge}
+                          </span>
+                        )}
                       </Link>
                     );
                   })}
@@ -202,22 +210,26 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         })}
       </nav>
 
-      <div className="border-t border-border p-4">
+      <div className="border-t border-border/60 p-4">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <button className="flex w-full items-center gap-3 rounded-lg bg-accent/50 px-3 py-2 transition-colors hover:bg-accent">
-              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+            <button className="flex w-full items-center gap-3 rounded-xl bg-accent/60 px-3.5 py-2.5 transition-all duration-200 hover:bg-accent/80">
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary/80 text-primary-foreground shadow-lg">
                 {initials}
               </div>
               <div className="flex-1 overflow-hidden text-left">
-                <p className="truncate text-sm font-medium">{userName}</p>
+                <p className="truncate text-sm font-semibold text-foreground">{userName}</p>
                 <p className="truncate text-xs text-muted-foreground">{userEmail || 'Not signed in'}</p>
               </div>
-              {hasSettingsAccess && <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">ADMIN</span>}
-              <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+              {hasSettingsAccess && (
+                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary border border-primary/20">
+                  ADMIN
+                </span>
+              )}
+              <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" side="top" className="w-56">
+          <DropdownMenuContent align="end" className="w-56 border border-border bg-card shadow-xl">
             <DropdownMenuItem className="text-sm font-medium">
               {userEmail}
             </DropdownMenuItem>
@@ -234,7 +246,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
               </>
             )}
             <DropdownMenuSeparator />
-            <DropdownMenuItem className="text-destructive" onClick={handleSignOut}>
+            <DropdownMenuItem className="text-destructive font-medium" onClick={handleSignOut}>
               <LogOut className="mr-2 h-4 w-4" /> Sign Out
             </DropdownMenuItem>
           </DropdownMenuContent>
@@ -298,8 +310,10 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             </div>
 
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setPwOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={pwLoading || !pwValid}>
+              <Button type="button" variant="outline" onClick={() => setPwOpen(false)} className="btn-lift">
+                Cancel
+              </Button>
+              <Button type="submit" disabled={pwLoading || !pwValid} className="btn-lift glow-green-hover">
                 {pwLoading ? 'Updating...' : 'Update Password'}
               </Button>
             </DialogFooter>
@@ -312,7 +326,7 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
 export function Sidebar() {
   return (
-    <aside className="hidden h-screen w-64 shrink-0 flex-col border-r border-border bg-card lg:flex">
+    <aside className="hidden h-screen w-72 shrink-0 flex-col border-r border-border/60 bg-card backdrop-blur-lg lg:flex">
       <SidebarContent />
     </aside>
   );

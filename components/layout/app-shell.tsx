@@ -73,10 +73,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div
         className={cn(
           'hidden lg:flex shrink-0 transition-all duration-300 overflow-hidden print:hidden',
-          desktopOpen ? 'w-64' : 'w-0'
+          desktopOpen ? 'w-72' : 'w-0'
         )}
       >
-        <div className="w-64 shrink-0">
+        <div className="w-72 shrink-0">
           <Sidebar />
         </div>
       </div>
@@ -86,13 +86,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           onToggleDesktop={toggleDesktop}
           onToggleMobile={() => setMobileOpen(true)}
         />
-        <main className="flex-1 overflow-y-auto bg-background p-4 sm:p-6 print:h-auto print:overflow-visible print:p-0">
-          {children}
+        <main className="flex-1 overflow-y-auto bg-secondary/30 print:h-auto print:overflow-visible print:p-0">
+          <div className="p-4 sm:p-6 lg:p-8">
+            {children}
+          </div>
         </main>
       </div>
 
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-        <SheetContent side="left" className="w-72 p-0 sm:max-w-xs">
+        <SheetContent side="left" className="w-72 p-0 sm:max-w-xs bg-card shadow-2xl">
           <SidebarContent onNavigate={() => setMobileOpen(false)} />
         </SheetContent>
       </Sheet>
