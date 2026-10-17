@@ -14,6 +14,9 @@ export const COMPLETION_ENFORCEMENT_KEY = 'completion_enforcement';
 export const PROGRESS_TOKEN_PURPOSE = 'training.progress';
 export const PROGRESS_TOKEN_TTL_SEC = 12 * 60 * 60;
 
+export const COMPANY_SETTINGS_GROUP = 'company';
+export const GEMINI_API_KEY_SETTING = 'gemini_api_key';
+
 export type EnforcementMode = 'SHADOW' | 'ENFORCED';
 
 export type CompletionState = 'IN_PROGRESS' | 'ELIGIBLE' | 'BLOCKED' | 'ISSUED';

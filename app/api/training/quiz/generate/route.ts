@@ -49,12 +49,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!quizProviderConfigured()) {
+  if (!(await quizProviderConfigured(db))) {
     return NextResponse.json(
       {
         ok: false,
         code: 'NOT_CONFIGURED',
-        error: 'No AI provider is configured. Add GEMINI_API_KEY to generate assessment questions automatically.',
+        error: 'No Gemini API key is configured. Add one under Settings → Company → GEMINI_API_KEY to generate assessment questions automatically.',
       },
       { status: 503 }
     );

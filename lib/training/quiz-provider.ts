@@ -1,5 +1,5 @@
 import type { Db } from './server';
-import { VIDEO_BUCKET } from './constants';
+import { COMPANY_SETTINGS_GROUP, GEMINI_API_KEY_SETTING, VIDEO_BUCKET } from './constants';
 
 export interface GeneratedQuestion {
   prompt: string;
@@ -36,14 +36,44 @@ export class QuizProviderError extends Error {
 const DEFAULT_GEMINI_MODEL = 'gemini-2.0-flash';
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com';
 
-function apiKey(): string {
+/** Un-mask a setting value (the UI may store a placeholder for a saved secret). */
+function parseSetting(raw: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  const t = typeof raw === 'string' ? raw.trim() : '';
+  if (!t) return '';
+  if (t.startsWith('••••')) return '';
+  try {
+    const parsed = JSON.parse(t);
+    return typeof parsed === 'string' ? parsed.trim() : t;
+  } catch {
+    return t.replace(/^"|"$/g, '').trim();
+  }
+}
+
+/**
+ * The Gemini key the assessment generator listens for: the Company setting
+ * (Settings → Company → GEMINI_API_KEY) first, then the env fallback.
+ */
+export async function getGeminiApiKey(db: Db): Promise<string> {
+  try {
+    const { data } = await db
+      .from('system_settings')
+      .select('value')
+      .eq('group_name', COMPANY_SETTINGS_GROUP)
+      .eq('key', GEMINI_API_KEY_SETTING)
+      .maybeSingle();
+    const fromSettings = parseSetting(data?.value);
+    if (fromSettings) return fromSettings;
+  } catch {
+    /* fall through */
+  }
   return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 }
 
-/** True when a real generation provider (Gemini) is configured. */
-export function quizProviderConfigured(): boolean {
+/** True when a key is available (settings or env). */
+export async function quizProviderConfigured(db: Db): Promise<boolean> {
   if (isMockMode()) return true;
-  return Boolean(apiKey());
+  return Boolean(await getGeminiApiKey(db));
 }
 
 function isMockMode(): boolean {
@@ -192,9 +222,9 @@ async function geminiUploadVideo(
 }
 
 async function generateWithGemini(input: QuizGenerationInput, db: Db): Promise<QuizGenerationResult> {
-  const key = apiKey();
+  const key = await getGeminiApiKey(db);
   if (!key) {
-    throw new QuizProviderError('NOT_CONFIGURED', 'No AI provider key is configured. Add GEMINI_API_KEY to enable question generation.');
+    throw new QuizProviderError('NOT_CONFIGURED', 'No Gemini API key is configured. Add one under Settings → Company → GEMINI_API_KEY.');
   }
   const video = await loadVideoBytes(db, input);
   const { uri } = await geminiUploadVideo(key, video);

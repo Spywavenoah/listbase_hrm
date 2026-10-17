@@ -18,6 +18,7 @@ export default function CompanyPage() {
     company_logo_url: '',
     tax_id: '',
     registration_number: '',
+    gemini_api_key: '',
   });
 
   useEffect(() => {
@@ -30,7 +31,12 @@ export default function CompanyPage() {
         if (data) {
           const next = { ...form };
           for (const row of data) {
-            if (row.key in next) next[row.key as keyof typeof next] = String(row.value);
+            const k = row.key as keyof typeof next;
+            if (k in next) {
+              next[k] = String(row.value);
+              // never echo a stored secret into the form
+              if (row.key === 'gemini_api_key') next.gemini_api_key = '••••';
+            }
           }
           setForm(next);
         }
@@ -46,11 +52,10 @@ export default function CompanyPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const settings = Object.entries(form).map(([key, value]) => ({
-        group_name: 'company',
-        key,
-        value,
-      }));
+      const settings = Object.entries(form)
+        .map(([key, value]) => ({ group_name: 'company', key, value }))
+        // never overwrite a saved secret with its mask
+        .filter((s) => !(s.key === 'gemini_api_key' && s.value.startsWith('••••')));
       const { error } = await supabase
         .from('system_settings')
         .upsert(settings, { onConflict: 'group_name,key' });
@@ -66,6 +71,7 @@ export default function CompanyPage() {
   if (loading) return <div className="h-64 animate-pulse rounded-lg bg-muted" />;
 
   return (
+    <>
     <Card className="animate-fade-in max-w-2xl">
       <CardHeader>
         <CardTitle className="text-lg">Company Profile</CardTitle>
@@ -102,5 +108,35 @@ export default function CompanyPage() {
         </div>
       </CardContent>
     </Card>
+
+    <Card className="animate-fade-in mt-6 max-w-2xl">
+      <CardHeader>
+        <CardTitle className="text-lg">AI — Gemini</CardTitle>
+        <CardDescription>
+          The API key used to generate end-of-video assessment questions automatically from each lesson video.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-1.5">
+          <Label>GEMINI_API_KEY</Label>
+          <Input
+            type="password"
+            autoComplete="off"
+            value={form.gemini_api_key}
+            onChange={(e) => setForm({ ...form, gemini_api_key: e.target.value })}
+            placeholder={form.gemini_api_key ? '' : 'AIza...'}
+          />
+          <p className="text-xs text-muted-foreground">
+            Saved in company settings and read by the assessment generator. Leave as-is to keep the stored key.
+          </p>
+        </div>
+        <div className="flex justify-end border-t border-border pt-4">
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving...' : 'Save Changes'}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+    </>
   );
 }
