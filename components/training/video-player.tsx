@@ -429,6 +429,7 @@ export function VideoPlayer({ enrollmentId, onCompleted }: VideoPlayerProps) {
 
   const issued = Boolean(cert?.certificateId);
   const coverage = Math.min(100, Math.round(progressPct));
+  const quizLocked = status.quiz.required && !status.quiz.passed;
 
   return (
     <div className="space-y-4">
@@ -552,14 +553,16 @@ export function VideoPlayer({ enrollmentId, onCompleted }: VideoPlayerProps) {
       )}
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" onClick={() => void submitCompletion()} disabled={busy || issued}>
-          {busy ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          ) : (
-            <Award className="mr-2 h-4 w-4" />
-          )}
-          {issued ? 'Completed' : 'Complete & issue certificate'}
-        </Button>
+        {!quizLocked && (
+          <Button size="sm" onClick={() => void submitCompletion()} disabled={busy || issued}>
+            {busy ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Award className="mr-2 h-4 w-4" />
+            )}
+            {issued ? 'Completed' : 'Complete & issue certificate'}
+          </Button>
+        )}
         {issued && cert?.pdfUrl && (
           <Button size="sm" variant="outline" asChild>
             <a href={cert.pdfUrl} target="_blank" rel="noopener noreferrer">
