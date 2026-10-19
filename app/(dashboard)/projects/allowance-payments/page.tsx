@@ -16,34 +16,32 @@ import { toast } from 'sonner';
 import { useAccess } from '@/lib/access';
 import { Coins, Wallet, Plus, FileText, Users, CalendarDays, CheckCircle2, CircleDollarSign } from 'lucide-react';
 import {
-  ALLOWANCE_CURRENCIES,
   ALLOWANCE_ADVICE_BUCKET,
   ALLOWANCE_ADVICE_MAX_SIZE,
   ALLOWANCE_ADVICE_TYPES,
-  DEFAULT_CYCLE_DAYS,
   MAX_DAYS_PER_PAYMENT,
+  computeWorkedDays,
   fmtDate,
   fmtMoney,
+  inclusiveDays,
+  resolveAllowanceRate,
   todayIso,
   employeeName,
   type AllowanceCycle,
   type AllowanceCycleEmployee,
   type AllowanceDayLedger,
   type AllowancePayment,
-  type EmployeeLite,
+  type CycleEmployeePreview,
+  type DeploymentInterval,
+  type OffshoreAllowance,
   type Project,
 } from '@/lib/projects';
 
-const GLOBAL = '__global__';
-
 const EMPTY_CYCLE = {
-  project_id: GLOBAL,
+  project_id: '',
   name: '',
   start_date: todayIso(),
-  total_days: String(DEFAULT_CYCLE_DAYS),
-  currency: 'USD',
-  day_rate: '',
-  employee_ids: [] as string[],
+  end_date: todayIso(),
 };
 
 const EMPTY_PAY = {
@@ -57,13 +55,19 @@ const EMPTY_PAY = {
 type CycleForm = typeof EMPTY_CYCLE;
 type PayForm = typeof EMPTY_PAY;
 
+/** A project_workforce row with the embedded employee name. */
+interface WorkforceRow extends DeploymentInterval {
+  employee_id: string;
+  employees: { first_name: string; last_name: string } | null;
+}
+
 export default function AllowancePaymentsPage() {
   const { can } = useAccess();
   const canManage = can('projects.allowance') || can('projects.manage') || can('admin.settings');
 
   const [cycles, setCycles] = useState<AllowanceCycle[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [employees, setEmployees] = useState<EmployeeLite[]>([]);
+  const [allowances, setAllowances] = useState<OffshoreAllowance[]>([]);
   const [selectedId, setSelectedId] = useState<string>('');
   const [loading, setLoading] = useState(true);
 
@@ -74,6 +78,8 @@ export default function AllowancePaymentsPage() {
   const [cycleOpen, setCycleOpen] = useState(false);
   const [cycleForm, setCycleForm] = useState<CycleForm>(EMPTY_CYCLE);
   const [creatingCycle, setCreatingCycle] = useState(false);
+  const [workforce, setWorkforce] = useState<WorkforceRow[]>([]);
+  const [cycleSel, setCycleSel] = useState<Set<string>>(new Set());
 
   const [payOpen, setPayOpen] = useState(false);
   const [payForm, setPayForm] = useState<PayForm>(EMPTY_PAY);
@@ -84,14 +90,14 @@ export default function AllowancePaymentsPage() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [c, p, e] = await Promise.all([
+      const [c, p, a] = await Promise.all([
         supabase.from('offshore_allowance_cycles').select('*').order('created_at', { ascending: false }),
         supabase.from('projects').select('*').order('name'),
-        supabase.from('employees').select('id, first_name, last_name').eq('employment_status', 'ACTIVE').order('first_name'),
+        supabase.from('offshore_allowances').select('*').order('effective_from', { ascending: false }),
       ]);
       setCycles((c.data || []) as unknown as AllowanceCycle[]);
       setProjects((p.data || []) as unknown as Project[]);
-      setEmployees((e.data || []) as unknown as EmployeeLite[]);
+      setAllowances((a.data || []) as unknown as OffshoreAllowance[]);
     } catch (err) {
       console.error(err);
     } finally {
@@ -141,32 +147,108 @@ export default function AllowancePaymentsPage() {
     return { paidDays, totalDays, remainingDays: Math.max(0, totalDays - paidDays), totalPaid };
   }, [ledger, payments]);
 
-  // ---- New cycle -----------------------------------------------------------
-  const openCycle = () => { setCycleForm(EMPTY_CYCLE); setCycleOpen(true); };
-
-  const toggleCycleEmployee = (id: string) => {
-    setCycleForm((f) => ({
-      ...f,
-      employee_ids: f.employee_ids.includes(id) ? f.employee_ids.filter((x) => x !== id) : [...f.employee_ids, id],
-    }));
+  // ---- New cycle (project-driven) ------------------------------------------
+  const openCycle = () => {
+    setCycleForm(EMPTY_CYCLE);
+    setWorkforce([]);
+    setCycleSel(new Set());
+    setCycleOpen(true);
   };
 
+  // Load the project's workforce whenever a real project is chosen.
+  useEffect(() => {
+    let active = true;
+    if (!cycleForm.project_id) { setWorkforce([]); return; }
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('project_workforce')
+          .select('employee_id, start_date, end_date, employees:id(first_name, last_name)')
+          .eq('project_id', cycleForm.project_id);
+        if (error) throw error;
+        if (active) setWorkforce(((data || []) as unknown as WorkforceRow[]));
+      } catch (err) {
+        console.error(err);
+        if (active) setWorkforce([]);
+      }
+    })();
+    return () => { active = false; };
+  }, [cycleForm.project_id]);
+
+  // Rate in force for the selected project on the cycle start date.
+  const resolvedRate = useMemo(() => {
+    if (!cycleForm.project_id) return null;
+    return resolveAllowanceRate(allowances, cycleForm.project_id, cycleForm.start_date);
+  }, [allowances, cycleForm.project_id, cycleForm.start_date]);
+
+  // Cycle length derived from the start/end dates.
+  const cycleTotalDays = useMemo(
+    () => (cycleForm.start_date && cycleForm.end_date && cycleForm.end_date >= cycleForm.start_date
+      ? inclusiveDays(cycleForm.start_date, cycleForm.end_date)
+      : 0),
+    [cycleForm.start_date, cycleForm.end_date],
+  );
+
+  // Group the project's deployments per employee so we can count worked days.
+  const workforceByEmployee = useMemo(() => {
+    const m: Record<string, { name: string; intervals: DeploymentInterval[] }> = {};
+    for (const row of workforce) {
+      const name = row.employees ? employeeName(row.employees as never) : row.employee_id;
+      (m[row.employee_id] ||= { name, intervals: [] }).intervals.push({ start_date: row.start_date, end_date: row.end_date });
+    }
+    return m;
+  }, [workforce]);
+
+  // Employees who actually worked within [start, end], with days + amount due.
+  const cyclePreview: CycleEmployeePreview[] = useMemo(() => {
+    if (!cycleForm.project_id || !cycleForm.start_date || !cycleForm.end_date || cycleTotalDays <= 0) return [];
+    const rate = resolvedRate ? Number(resolvedRate.amount) : 0;
+    const rows: CycleEmployeePreview[] = [];
+    for (const [empId, info] of Object.entries(workforceByEmployee)) {
+      const worked = computeWorkedDays(info.intervals, cycleForm.start_date, cycleForm.end_date);
+      if (worked <= 0) continue;
+      rows.push({ employee_id: empId, name: info.name, worked_days: worked, day_rate: rate, amount_due: worked * rate });
+    }
+    rows.sort((a, b) => a.name.localeCompare(b.name));
+    return rows;
+  }, [workforceByEmployee, cycleForm.project_id, cycleForm.start_date, cycleForm.end_date, cycleTotalDays, resolvedRate]);
+
+  // Re-select every previewed employee whenever the preview set changes.
+  const previewKey = cyclePreview.map((r) => r.employee_id).join(',');
+  useEffect(() => { setCycleSel(new Set(cyclePreview.map((r) => r.employee_id))); }, [previewKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleCycleEmployee = (id: string) => {
+    setCycleSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const selectedPreview = useMemo(() => cyclePreview.filter((r) => cycleSel.has(r.employee_id)), [cyclePreview, cycleSel]);
+  const selectedEntitlementDays = selectedPreview.reduce((s, r) => s + r.worked_days, 0);
+  const selectedAmountDue = selectedPreview.reduce((s, r) => s + r.amount_due, 0);
+
   const createCycle = async () => {
+    if (!cycleForm.project_id) { toast.error('Select a project'); return; }
     if (!cycleForm.name.trim()) { toast.error('Cycle name is required'); return; }
-    if (!cycleForm.start_date) { toast.error('Start date is required'); return; }
-    const days = Number(cycleForm.total_days);
-    if (!days || days <= 0) { toast.error('Total days must be greater than zero'); return; }
-    if (cycleForm.employee_ids.length === 0) { toast.error('Select at least one employee'); return; }
+    if (!cycleForm.start_date || !cycleForm.end_date) { toast.error('Start and end dates are required'); return; }
+    if (cycleTotalDays <= 0) { toast.error('End date cannot be before start date'); return; }
+    if (selectedPreview.length === 0) { toast.error('Select at least one employee who worked in this period'); return; }
     setCreatingCycle(true);
     try {
+      const payload = selectedPreview.map((r) => ({
+        employee_id: r.employee_id,
+        worked_days: r.worked_days,
+        day_rate: r.day_rate,
+      }));
       const { data, error } = await supabase.rpc('create_offshore_allowance_cycle', {
-        p_project_id: cycleForm.project_id === GLOBAL ? null : cycleForm.project_id,
+        p_project_id: cycleForm.project_id,
         p_name: cycleForm.name.trim(),
         p_start_date: cycleForm.start_date,
-        p_total_days: days,
-        p_currency: cycleForm.currency,
-        p_employee_ids: cycleForm.employee_ids,
-        p_day_rate: cycleForm.day_rate === '' ? 0 : Number(cycleForm.day_rate),
+        p_end_date: cycleForm.end_date,
+        p_currency: resolvedRate?.currency || 'USD',
+        p_employees: payload,
       });
       if (error) throw error;
       toast.success('Cycle created');
@@ -191,17 +273,19 @@ export default function AllowancePaymentsPage() {
   const togglePayEmployee = (id: string) => {
     setPayForm((f) => {
       const employee_ids = f.employee_ids.includes(id) ? f.employee_ids.filter((x) => x !== id) : [...f.employee_ids, id];
-      // Drop days that are no longer pending for every selected employee.
-      const day_nos = f.day_nos.filter((d) => dayPendingForAll(employee_ids, d));
+      // Drop days that are no longer both entitled and unpaid for every selected employee.
+      const day_nos = f.day_nos.filter((d) => daySelectable(employee_ids, d));
       return { ...f, employee_ids, day_nos };
     });
   };
 
-  const dayPendingForAll = (employeeIds: string[], day: number): boolean => {
+  // A day can be paid only if every selected employee is entitled to it (a
+  // ledger row exists) and it is not already paid.
+  const daySelectable = (employeeIds: string[], day: number): boolean => {
     if (employeeIds.length === 0) return false;
     return employeeIds.every((empId) => {
       const row = ledger.find((l) => l.employee_id === empId && l.day_no === day);
-      return !row || row.status !== 'PAID';
+      return Boolean(row) && row!.status !== 'PAID';
     });
   };
 
@@ -209,7 +293,7 @@ export default function AllowancePaymentsPage() {
     setPayForm((f) => {
       if (f.day_nos.includes(day)) return { ...f, day_nos: f.day_nos.filter((d) => d !== day) };
       if (f.day_nos.length >= MAX_DAYS_PER_PAYMENT) { toast.error(`You can pay a maximum of ${MAX_DAYS_PER_PAYMENT} days at a time`); return f; }
-      if (!dayPendingForAll(f.employee_ids, day)) { toast.error('That day is already paid for a selected employee'); return f; }
+      if (!daySelectable(f.employee_ids, day)) { toast.error('That day is not available to pay for a selected employee'); return f; }
       return { ...f, day_nos: [...f.day_nos, day].sort((a, b) => a - b) };
     });
   };
@@ -282,7 +366,7 @@ export default function AllowancePaymentsPage() {
     }
   };
 
-  const dayCount = selectedCycle ? selectedCycle.total_days : DEFAULT_CYCLE_DAYS;
+  const dayCount = selectedCycle ? selectedCycle.total_days : 0;
 
   const summaryCards = [
     { label: 'Employees', value: cycleEmployees.length, icon: Users, color: 'primary' as const },
@@ -363,7 +447,7 @@ export default function AllowancePaymentsPage() {
                     <tr className="border-b">
                       <th className="py-2 pr-4 text-left font-medium">Employee</th>
                       <th className="py-2 pr-4 text-left font-medium">Rate / day</th>
-                      <th className="py-2 pr-2 text-left font-medium">Days</th>
+                      <th className="py-2 pr-2 text-left font-medium">Worked days</th>
                       <th className="py-2 pl-2 text-left font-medium">Paid / left</th>
                     </tr>
                   </thead>
@@ -377,25 +461,21 @@ export default function AllowancePaymentsPage() {
                           <td className="py-2 pr-4 whitespace-nowrap">{fmtMoney(ce.day_rate, selectedCycle.currency)}</td>
                           <td className="py-2 pr-2">
                             <div className="flex flex-wrap gap-1">
-                              {Array.from({ length: dayCount }, (_, i) => i + 1).map((d) => {
-                                const row = rows.find((r) => r.day_no === d);
-                                const isPaid = row?.status === 'PAID';
-                                return (
-                                  <span
-                                    key={d}
-                                    title={`Day ${d} — ${isPaid ? 'Paid' : 'Pending'}`}
-                                    className={`inline-flex h-6 min-w-6 items-center justify-center rounded px-1 text-xs font-medium ${isPaid ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'}`}
-                                  >
-                                    {d}
-                                  </span>
-                                );
-                              })}
+                              {rows.map((row) => (
+                                <span
+                                  key={row.day_no}
+                                  title={`Day ${row.day_no} — ${row.status === 'PAID' ? 'Paid' : 'Pending'}`}
+                                  className={`inline-flex h-6 min-w-6 items-center justify-center rounded px-1 text-xs font-medium ${row.status === 'PAID' ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'}`}
+                                >
+                                  {row.day_no}
+                                </span>
+                              ))}
                             </div>
                           </td>
                           <td className="py-2 pl-2 whitespace-nowrap">
                             <Badge variant="outline" className="bg-success/10 text-success">{paid}</Badge>
                             <span className="mx-1 text-muted-foreground">/</span>
-                            <Badge variant="outline" className="bg-warning/10 text-warning">{Math.max(0, dayCount - paid)}</Badge>
+                            <Badge variant="outline" className="bg-warning/10 text-warning">{Math.max(0, rows.length - paid)}</Badge>
                           </td>
                         </tr>
                       );
@@ -469,11 +549,10 @@ export default function AllowancePaymentsPage() {
           <DialogHeader><DialogTitle>New Allowance Cycle</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-1.5">
-              <Label>Project (optional)</Label>
-              <Select value={cycleForm.project_id} onValueChange={(v) => setCycleForm({ ...cycleForm, project_id: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+              <Label>Project *</Label>
+              <Select value={cycleForm.project_id || undefined} onValueChange={(v) => setCycleForm({ ...cycleForm, project_id: v || '' })}>
+                <SelectTrigger><SelectValue placeholder="Select a project" /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value={GLOBAL}>All projects</SelectItem>
                   {projects.map((p) => (
                     <SelectItem key={p.id} value={p.id}>{p.code ? `${p.code} · ` : ''}{p.name}</SelectItem>
                   ))}
@@ -490,45 +569,114 @@ export default function AllowancePaymentsPage() {
                 <Input type="date" value={cycleForm.start_date} onChange={(e) => setCycleForm({ ...cycleForm, start_date: e.target.value })} />
               </div>
               <div className="space-y-1.5">
-                <Label>Total days *</Label>
-                <Input type="number" min="1" value={cycleForm.total_days} onChange={(e) => setCycleForm({ ...cycleForm, total_days: e.target.value })} />
+                <Label>End date *</Label>
+                <Input type="date" value={cycleForm.end_date} min={cycleForm.start_date} onChange={(e) => setCycleForm({ ...cycleForm, end_date: e.target.value })} />
               </div>
               <div className="space-y-1.5">
-                <Label>Currency</Label>
-                <Select value={cycleForm.currency} onValueChange={(v) => setCycleForm({ ...cycleForm, currency: v })}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {ALLOWANCE_CURRENCIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
-                  </SelectContent>
-                </Select>
+                <Label>Total days</Label>
+                <Input type="number" value={cycleTotalDays > 0 ? String(cycleTotalDays) : ''} readOnly className="bg-muted" />
               </div>
             </div>
-            <div className="space-y-1.5">
-              <Label>Rate per day (default)</Label>
-              <Input type="number" min="0" step="0.01" value={cycleForm.day_rate} onChange={(e) => setCycleForm({ ...cycleForm, day_rate: e.target.value })} placeholder="120" />
+
+            <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+                <span>
+                  <span className="text-muted-foreground">Allowance rate: </span>
+                  <span className="font-medium">
+                    {resolvedRate ? `${fmtMoney(resolvedRate.amount, resolvedRate.currency)} / day` : 'No rate configured'}
+                  </span>
+                </span>
+                {resolvedRate && (
+                  <span className="text-xs text-muted-foreground">{resolvedRate.name}</span>
+                )}
+                <span className="ml-auto">
+                  <span className="text-muted-foreground">Currency: </span>
+                  <span className="font-medium">{resolvedRate?.currency || 'USD'}</span>
+                </span>
+              </div>
+              {resolvedRate && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Amount due = worked days × rate. Project-specific rates override the default; the latest effective rate wins.
+                </p>
+              )}
             </div>
+
             <div className="space-y-1.5">
-              <Label>Employees * ({cycleForm.employee_ids.length} selected)</Label>
-              <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border p-2">
-                {employees.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No active employees.</p>
-                ) : (
-                  employees.map((emp) => (
-                    <label key={emp.id} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted">
-                      <Checkbox
-                        checked={cycleForm.employee_ids.includes(emp.id)}
-                        onCheckedChange={() => toggleCycleEmployee(emp.id)}
-                      />
-                      <span>{employeeName(emp)}</span>
-                    </label>
-                  ))
+              <div className="flex items-center justify-between">
+                <Label>
+                  Employees * ({selectedPreview.length} of {cyclePreview.length} selected)
+                </Label>
+                {cyclePreview.length > 0 && (
+                  <button
+                    type="button"
+                    className="text-xs text-primary hover:underline"
+                    onClick={() => setCycleSel(selectedPreview.length === cyclePreview.length ? new Set() : new Set(cyclePreview.map((r) => r.employee_id)))}
+                  >
+                    {selectedPreview.length === cyclePreview.length ? 'Clear all' : 'Select all'}
+                  </button>
                 )}
               </div>
+              <div className="max-h-72 overflow-y-auto rounded-md border">
+                {!cycleForm.project_id ? (
+                  <p className="p-3 text-sm text-muted-foreground">Select a project to list its workforce.</p>
+                ) : cyclePreview.length === 0 ? (
+                  <p className="p-3 text-sm text-muted-foreground">
+                    {cycleForm.start_date && cycleForm.end_date && cycleTotalDays > 0
+                      ? 'No employees worked on this project during the selected period.'
+                      : 'Select a valid start and end date to compute worked days.'}
+                  </p>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b bg-muted/50">
+                        <th className="w-10 p-2" />
+                        <th className="p-2 text-left font-medium">Employee</th>
+                        <th className="p-2 text-right font-medium">Worked days</th>
+                        <th className="p-2 text-right font-medium">Rate / day</th>
+                        <th className="p-2 text-right font-medium">Amount due</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cyclePreview.map((row) => (
+                        <tr key={row.employee_id} className="border-b last:border-0">
+                          <td className="p-2">
+                            <Checkbox
+                              checked={cycleSel.has(row.employee_id)}
+                              onCheckedChange={() => toggleCycleEmployee(row.employee_id)}
+                            />
+                          </td>
+                          <td className="p-2">{row.name}</td>
+                          <td className="p-2 text-right">{row.worked_days}</td>
+                          <td className="p-2 text-right">{fmtMoney(row.day_rate, resolvedRate?.currency)}</td>
+                          <td className="p-2 text-right font-medium">{fmtMoney(row.amount_due, resolvedRate?.currency)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t bg-muted/50 font-medium">
+                        <td className="p-2" />
+                        <td className="p-2">Selected total</td>
+                        <td className="p-2 text-right">{selectedEntitlementDays}</td>
+                        <td className="p-2" />
+                        <td className="p-2 text-right">{fmtMoney(selectedAmountDue, resolvedRate?.currency)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                )}
+              </div>
+              {cyclePreview.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Each employee is entitled to the number of days they worked within the cycle period.
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCycleOpen(false)}>Cancel</Button>
-            <Button onClick={createCycle} disabled={creatingCycle || !cycleForm.name.trim() || cycleForm.employee_ids.length === 0}>
+            <Button
+              onClick={createCycle}
+              disabled={creatingCycle || !cycleForm.project_id || !cycleForm.name.trim() || cycleTotalDays <= 0 || selectedPreview.length === 0}
+            >
               {creatingCycle ? 'Creating...' : 'Create Cycle'}
             </Button>
           </DialogFooter>
@@ -575,7 +723,7 @@ export default function AllowancePaymentsPage() {
               <Label>Days to pay * (max {MAX_DAYS_PER_PAYMENT})</Label>
               <div className="flex flex-wrap gap-1.5">
                 {Array.from({ length: dayCount }, (_, i) => i + 1).map((d) => {
-                  const selectable = dayPendingForAll(payForm.employee_ids, d);
+                  const selectable = daySelectable(payForm.employee_ids, d);
                   const checked = payForm.day_nos.includes(d);
                   return (
                     <button
@@ -590,7 +738,7 @@ export default function AllowancePaymentsPage() {
                             ? 'border-border bg-background hover:bg-muted'
                             : 'cursor-not-allowed border-border bg-muted text-muted-foreground opacity-60'
                       }`}
-                      title={selectable ? `Day ${d}` : `Day ${d} already paid for a selected employee`}
+                      title={selectable ? `Day ${d}` : `Day ${d} unavailable (not worked or already paid)`}
                     >
                       {d}
                     </button>

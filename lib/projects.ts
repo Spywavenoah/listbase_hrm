@@ -264,3 +264,75 @@ export function allowanceDayStatusClass(status: string): string {
 export function allowanceDayStatusLabel(status: string): string {
   return status === 'PAID' ? 'Paid' : 'Pending';
 }
+
+/**
+ * Resolve the offshore allowance rate in force for a project on a given date.
+ * Mirrors the SQL resolver used by the offshore report: project-specific rates
+ * beat the global default, and within the same scope the latest effective_from
+ * wins. Several rates can be configured for one project; this picks the one
+ * that applies. Returns null when no active rate covers the date.
+ */
+export function resolveAllowanceRate(
+  allowances: OffshoreAllowance[],
+  projectId: string | null | undefined,
+  onDate: string,
+): OffshoreAllowance | null {
+  const candidates = allowances.filter((a) => {
+    if (!a.is_active) return false;
+    if (a.effective_from > onDate) return false;
+    if (a.effective_to && a.effective_to < onDate) return false;
+    // Project-specific rates apply to their project; null project_id = default for all.
+    return a.project_id === null || a.project_id === projectId;
+  });
+  if (candidates.length === 0) return null;
+  const OPEN_END = '9999-12-31';
+  candidates.sort((a, b) => {
+    const pa = a.project_id ? 1 : 0;
+    const pb = b.project_id ? 1 : 0;
+    if (pb !== pa) return pb - pa; // project-specific first
+    if (a.effective_from !== b.effective_from) return a.effective_from < b.effective_from ? 1 : -1; // latest effective_from
+    const ea = a.effective_to || OPEN_END;
+    const eb = b.effective_to || OPEN_END;
+    if (ea !== eb) return ea < eb ? 1 : -1; // open/latest end first
+    return 0;
+  });
+  return candidates[0];
+}
+
+/** A deployment interval (subset of project_workforce). */
+export interface DeploymentInterval {
+  start_date: string;
+  end_date: string | null;
+}
+
+/**
+ * Count how many calendar days in [start, end] (inclusive) the employee was
+ * deployed on the project. Overlapping intervals are de-duplicated (a day is
+ * counted once if covered by any interval). Open-ended intervals (end_date
+ * null) count up to the range end.
+ */
+export function computeWorkedDays(
+  intervals: DeploymentInterval[],
+  start: string,
+  end: string,
+): number {
+  if (!start || !end || end < start) return 0;
+  let count = 0;
+  const d = new Date(start + 'T00:00:00Z');
+  const last = new Date(end + 'T00:00:00Z');
+  while (d <= last) {
+    const day = d.toISOString().slice(0, 10);
+    if (intervals.some((iv) => day >= iv.start_date && (!iv.end_date || day <= iv.end_date))) count++;
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return count;
+}
+
+/** A pre-filled employee row in the New Cycle dialog (worked days + amount due). */
+export interface CycleEmployeePreview {
+  employee_id: string;
+  name: string;
+  worked_days: number;
+  day_rate: number;
+  amount_due: number;
+}
