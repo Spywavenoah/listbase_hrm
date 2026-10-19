@@ -20,7 +20,7 @@ import {
   ALLOWANCE_ADVICE_MAX_SIZE,
   ALLOWANCE_ADVICE_TYPES,
   MAX_DAYS_PER_PAYMENT,
-  computeWorkedDays,
+  workedDates,
   fmtDate,
   fmtMoney,
   inclusiveDays,
@@ -80,6 +80,7 @@ export default function AllowancePaymentsPage() {
   const [creatingCycle, setCreatingCycle] = useState(false);
   const [workforce, setWorkforce] = useState<WorkforceRow[]>([]);
   const [cycleSel, setCycleSel] = useState<Set<string>>(new Set());
+  const [paidDays, setPaidDays] = useState<Set<string>>(new Set());
 
   const [payOpen, setPayOpen] = useState(false);
   const [payForm, setPayForm] = useState<PayForm>(EMPTY_PAY);
@@ -158,18 +159,38 @@ export default function AllowancePaymentsPage() {
   // Load the project's workforce whenever a real project is chosen.
   useEffect(() => {
     let active = true;
-    if (!cycleForm.project_id) { setWorkforce([]); return; }
+    if (!cycleForm.project_id) { setWorkforce([]); setPaidDays(new Set()); return; }
     (async () => {
       try {
+        // Explicit FK hint (employee_id) — `employees:id(...)` is ambiguous for
+        // project_workforce (multiple relationships), so name the FK column.
         const { data, error } = await supabase
           .from('project_workforce')
-          .select('employee_id, start_date, end_date, employees:id(first_name, last_name)')
+          .select('employee_id, start_date, end_date, employees:employee_id(first_name, last_name)')
           .eq('project_id', cycleForm.project_id);
         if (error) throw error;
         if (active) setWorkforce(((data || []) as unknown as WorkforceRow[]));
       } catch (err) {
         console.error(err);
         if (active) setWorkforce([]);
+      }
+      try {
+        // Calendar days already PAID for this project (in any cycle), so the
+        // preview only offers unpaid entitlement — mirrors the server check.
+        const { data, error } = await supabase
+          .from('offshore_allowance_day_ledger')
+          .select('employee_id, day_date, status, cycles:cycle_id(project_id)')
+          .eq('status', 'PAID');
+        if (error) throw error;
+        if (!active) return;
+        const paid = new Set<string>();
+        for (const row of (data || []) as unknown as { employee_id: string; day_date: string | null; cycles: { project_id: string } | null }[]) {
+          if (row.day_date && row.cycles?.project_id === cycleForm.project_id) paid.add(`${row.employee_id}|${row.day_date}`);
+        }
+        setPaidDays(paid);
+      } catch (err) {
+        console.error(err);
+        if (active) setPaidDays(new Set());
       }
     })();
     return () => { active = false; };
@@ -199,19 +220,21 @@ export default function AllowancePaymentsPage() {
     return m;
   }, [workforce]);
 
-  // Employees who actually worked within [start, end], with days + amount due.
+  // Employees who actually worked within [start, end], minus any day already
+  // paid in another cycle for this project, with days + amount due.
   const cyclePreview: CycleEmployeePreview[] = useMemo(() => {
     if (!cycleForm.project_id || !cycleForm.start_date || !cycleForm.end_date || cycleTotalDays <= 0) return [];
     const rate = resolvedRate ? Number(resolvedRate.amount) : 0;
     const rows: CycleEmployeePreview[] = [];
     for (const [empId, info] of Object.entries(workforceByEmployee)) {
-      const worked = computeWorkedDays(info.intervals, cycleForm.start_date, cycleForm.end_date);
+      const worked = workedDates(info.intervals, cycleForm.start_date, cycleForm.end_date)
+        .filter((day) => !paidDays.has(`${empId}|${day}`)).length;
       if (worked <= 0) continue;
       rows.push({ employee_id: empId, name: info.name, worked_days: worked, day_rate: rate, amount_due: worked * rate });
     }
     rows.sort((a, b) => a.name.localeCompare(b.name));
     return rows;
-  }, [workforceByEmployee, cycleForm.project_id, cycleForm.start_date, cycleForm.end_date, cycleTotalDays, resolvedRate]);
+  }, [workforceByEmployee, cycleForm.project_id, cycleForm.start_date, cycleForm.end_date, cycleTotalDays, resolvedRate, paidDays]);
 
   // Re-select every previewed employee whenever the preview set changes.
   const previewKey = cyclePreview.map((r) => r.employee_id).join(',');
@@ -237,18 +260,13 @@ export default function AllowancePaymentsPage() {
     if (selectedPreview.length === 0) { toast.error('Select at least one employee who worked in this period'); return; }
     setCreatingCycle(true);
     try {
-      const payload = selectedPreview.map((r) => ({
-        employee_id: r.employee_id,
-        worked_days: r.worked_days,
-        day_rate: r.day_rate,
-      }));
       const { data, error } = await supabase.rpc('create_offshore_allowance_cycle', {
         p_project_id: cycleForm.project_id,
         p_name: cycleForm.name.trim(),
         p_start_date: cycleForm.start_date,
         p_end_date: cycleForm.end_date,
         p_currency: resolvedRate?.currency || 'USD',
-        p_employees: payload,
+        p_employee_ids: selectedPreview.map((r) => r.employee_id),
       });
       if (error) throw error;
       toast.success('Cycle created');

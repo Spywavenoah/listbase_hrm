@@ -306,6 +306,28 @@ export interface DeploymentInterval {
 }
 
 /**
+ * The calendar dates in [start, end] (inclusive) the employee was deployed on
+ * the project. Overlapping intervals are de-duplicated (a date appears once if
+ * covered by any interval). Open-ended intervals count up to the range end.
+ */
+export function workedDates(
+  intervals: DeploymentInterval[],
+  start: string,
+  end: string,
+): string[] {
+  if (!start || !end || end < start) return [];
+  const dates: string[] = [];
+  const d = new Date(start + 'T00:00:00Z');
+  const last = new Date(end + 'T00:00:00Z');
+  while (d <= last) {
+    const day = d.toISOString().slice(0, 10);
+    if (intervals.some((iv) => day >= iv.start_date && (!iv.end_date || day <= iv.end_date))) dates.push(day);
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+/**
  * Count how many calendar days in [start, end] (inclusive) the employee was
  * deployed on the project. Overlapping intervals are de-duplicated (a day is
  * counted once if covered by any interval). Open-ended intervals (end_date
@@ -316,16 +338,7 @@ export function computeWorkedDays(
   start: string,
   end: string,
 ): number {
-  if (!start || !end || end < start) return 0;
-  let count = 0;
-  const d = new Date(start + 'T00:00:00Z');
-  const last = new Date(end + 'T00:00:00Z');
-  while (d <= last) {
-    const day = d.toISOString().slice(0, 10);
-    if (intervals.some((iv) => day >= iv.start_date && (!iv.end_date || day <= iv.end_date))) count++;
-    d.setUTCDate(d.getUTCDate() + 1);
-  }
-  return count;
+  return workedDates(intervals, start, end).length;
 }
 
 /** A pre-filled employee row in the New Cycle dialog (worked days + amount due). */
