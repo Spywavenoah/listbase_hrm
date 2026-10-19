@@ -189,3 +189,78 @@ export function firstOfMonthIso(): string {
   const d = new Date();
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString().slice(0, 10);
 }
+
+// ---------------------------------------------------------------------------
+// Offshore allowance payment & tracking.
+// ---------------------------------------------------------------------------
+
+/** A payment cycle: a 20-day offshore allowance period (optionally per project). */
+export interface AllowanceCycle {
+  id: string;
+  project_id: string | null;
+  name: string;
+  start_date: string;
+  end_date: string | null;
+  total_days: number;
+  currency: string;
+  created_by: string | null;
+  created_at: string;
+}
+
+/** An employee attached to a cycle, with their per-day rate. */
+export interface AllowanceCycleEmployee {
+  id: string;
+  cycle_id: string;
+  employee_id: string;
+  day_rate: number;
+  created_at: string;
+  employees?: EmployeeLite | null;
+}
+
+/** A bulk payment batch (<= 4 days) covering many employees. */
+export interface AllowancePayment {
+  id: string;
+  cycle_id: string;
+  reference: string | null;
+  payment_date: string;
+  days_count: number;
+  employee_count: number;
+  total_amount: number;
+  currency: string;
+  notes: string | null;
+  advice_path: string | null;
+  advice_url: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+/** Per-employee per-day paid/pending status. */
+export interface AllowanceDayLedger {
+  id: string;
+  cycle_id: string;
+  employee_id: string;
+  day_no: number;
+  status: 'PENDING' | 'PAID';
+  amount: number;
+  payment_id: string | null;
+  paid_at: string | null;
+}
+
+/** Max days finance can pay in a single batch. */
+export const MAX_DAYS_PER_PAYMENT = 4;
+
+/** Default cycle length in days. */
+export const DEFAULT_CYCLE_DAYS = 20;
+
+/** Payment advice upload constraints (private bucket). */
+export const ALLOWANCE_ADVICE_BUCKET = 'allowance-payment-advice';
+export const ALLOWANCE_ADVICE_MAX_SIZE = 15 * 1024 * 1024;
+export const ALLOWANCE_ADVICE_TYPES = ['application/pdf', 'image/jpeg', 'image/png'];
+
+export function allowanceDayStatusClass(status: string): string {
+  return status === 'PAID' ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning';
+}
+
+export function allowanceDayStatusLabel(status: string): string {
+  return status === 'PAID' ? 'Paid' : 'Pending';
+}

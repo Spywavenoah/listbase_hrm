@@ -44,6 +44,27 @@ export default function StockPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [addForm, setAddForm] = useState({ ...EMPTY_ADD });
+  const [liveBefore, setLiveBefore] = useState<number | null>(null);
+
+  // Live "balance before" for the Add Stock (receipt) form.
+  useEffect(() => {
+    let active = true;
+    if (!addForm.item_id || !addForm.warehouse_id) { setLiveBefore(null); return; }
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('inventory_stock')
+          .select('quantity')
+          .eq('item_id', addForm.item_id)
+          .eq('warehouse_id', addForm.warehouse_id)
+          .maybeSingle();
+        if (active) setLiveBefore(data ? Number(data.quantity) || 0 : 0);
+      } catch {
+        if (active) setLiveBefore(0);
+      }
+    })();
+    return () => { active = false; };
+  }, [addForm.item_id, addForm.warehouse_id]);
 
   const load = useCallback(async () => {
     try {
@@ -282,6 +303,28 @@ export default function StockPage() {
                 <Input type="date" value={addForm.movement_date} onChange={(e) => setAddForm({ ...addForm, movement_date: e.target.value })} />
               </div>
             </div>
+            {liveBefore !== null && (
+              (() => {
+                const qty = addForm.quantity === '' ? null : Number(addForm.quantity);
+                const after = qty !== null && Number.isFinite(qty) ? liveBefore + qty : null;
+                return (
+                  <div className="grid gap-4 sm:grid-cols-3 rounded-lg border border-border bg-muted/40 p-3 text-sm">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Balance before</p>
+                      <p className="font-medium">{fmtQty(liveBefore)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Quantity entered</p>
+                      <p className="font-medium">{qty !== null && Number.isFinite(qty) ? fmtQty(qty) : '—'}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Balance after</p>
+                      <p className="font-medium">{after !== null ? fmtQty(after) : '—'}</p>
+                    </div>
+                  </div>
+                );
+              })()
+            )}
             <div className="grid gap-4 sm:grid-cols-3">
               <div className="space-y-1.5">
                 <Label>Reference</Label>

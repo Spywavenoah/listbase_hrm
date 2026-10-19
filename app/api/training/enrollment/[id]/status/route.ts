@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase/server';
 import { newSessionId, signProgressToken, verifyEmployeeAuth } from '@/lib/training/auth';
-import { canInspect, courseVideoUrl, evaluate, getEnforcement, hasCourseVideo, loadEnrollment, renewalDaysLeft } from '@/lib/training/server';
+import { canInspect, canViewCertificates, courseVideoUrl, evaluate, getEnforcement, hasCourseVideo, loadEnrollment, renewalDaysLeft } from '@/lib/training/server';
 import { getQuizCourseSummary, loadQuizQuestions } from '@/lib/training/quiz-server';
 import { coveragePct } from '@/lib/training/segments';
 import { HEARTBEAT_INTERVAL_MS, type CompletionState, type EnforcementMode } from '@/lib/training/constants';
@@ -47,11 +47,14 @@ export async function GET(
     : Number(ctx.enrollment.progress || 0);
 
   const sessionId = newSessionId();
+  // Certificates are locked by default — the PDF link is only revealed to
+  // employees who hold the training.certificates privilege (or manage training).
+  const showCert = await canViewCertificates(db, auth.employeeId);
   const certificate: CertificateInfo = {
     certificateId: (ctx.enrollment.certificate_id as string) || null,
     issuedAt: (ctx.enrollment.certificate_issued_at as string) || null,
     expiresAt: (ctx.enrollment.certificate_expires_at as string) || null,
-    pdfUrl: (ctx.enrollment.certificate_pdf_url as string) || null,
+    pdfUrl: showCert ? ((ctx.enrollment.certificate_pdf_url as string) || null) : null,
     cycle: Number(ctx.enrollment.cycle || 1),
   };
 

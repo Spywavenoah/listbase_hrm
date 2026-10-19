@@ -87,6 +87,23 @@ export async function canManageTraining(db: Db, employeeId: string): Promise<boo
   return Boolean(grants && grants.length > 0);
 }
 
+/**
+ * Certificates are locked down by default: no employee may access a certificate
+ * (personal or organisation-wide) unless they hold the `training.certificates`
+ * privilege, manage training, or are a super admin.
+ */
+export async function canViewCertificates(db: Db, employeeId: string): Promise<boolean> {
+  if (!employeeId) return false;
+  const { data: emp } = await db.from('employees').select('role').eq('id', employeeId).maybeSingle();
+  if (emp?.role === 'SUPER_ADMIN') return true;
+  const { data: grants } = await db
+    .from('employee_privileges')
+    .select('privilege_key')
+    .eq('employee_id', employeeId)
+    .in('privilege_key', ['training.certificates', 'training.manage']);
+  return Boolean(grants && grants.length > 0);
+}
+
 export async function loadEnrollment(db: Db, enrollmentId: string): Promise<EnrollmentContext | null> {
   const { data, error } = await db
     .from('training_enrollments')

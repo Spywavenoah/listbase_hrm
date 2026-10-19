@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase/server';
 import { verifyEmployeeAuth, verifyProgressToken } from '@/lib/training/auth';
-import { canInspect, getEnforcement, hasCourseVideo, issueCertificate, loadEnrollment, renewalDaysLeft } from '@/lib/training/server';
+import { canInspect, canViewCertificates, getEnforcement, hasCourseVideo, issueCertificate, loadEnrollment, renewalDaysLeft } from '@/lib/training/server';
 import type { CompletionEvaluation } from '@/lib/training/types';
 
 export const runtime = 'nodejs';
@@ -66,6 +66,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Certificates are locked by default — the PDF link is only revealed to
+  // employees who hold the training.certificates privilege (or manage training).
+  const showCert = await canViewCertificates(db, auth.employeeId);
+
   return NextResponse.json({
     ok: true,
     enforced: shouldEnforce,
@@ -77,7 +81,7 @@ export async function POST(request: NextRequest) {
       certificateId: result.certificateId || null,
       issuedAt: result.issuedAt || null,
       expiresAt: result.expiresAt || null,
-      pdfUrl: result.pdfUrl || null,
+      pdfUrl: showCert ? (result.pdfUrl || null) : null,
       cycle: result.cycle || 1,
     },
     renewalDaysLeft: renewalDaysLeft(result.expiresAt || null),

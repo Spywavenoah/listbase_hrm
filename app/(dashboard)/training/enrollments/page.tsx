@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
+import { useAccess } from '@/lib/access';
 
 interface Enrollment {
   id: string;
@@ -43,6 +44,10 @@ function renewalBadge(expiresAt: string): RenewalBadge {
 }
 
 export default function EnrollmentsPage() {
+  const { can } = useAccess();
+  // Certificates are locked by default — only show certificate columns to
+  // employees who hold the training.certificates privilege.
+  const showCerts = can('training.certificates');
   const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
   const [employees, setEmployees] = useState<{ id: string; first_name: string; last_name: string }[]>([]);
   const [courses, setCourses] = useState<{ id: string; title: string }[]>([]);
@@ -154,36 +159,41 @@ export default function EnrollmentsPage() {
         );
       },
     },
-    {
-      key: 'certificate_id', label: 'Certificate',
-      searchText: (e) => [e.certificate_id || ''],
-      render: (e) => e.certificate_id
-        ? (
-          <span className="inline-flex items-center gap-1 text-xs">
-            <Award className="h-3.5 w-3.5 text-success" />
-            <a
-              href={e.certificate_pdf_url || '#'}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary hover:underline"
-              onClick={(ev) => { if (!e.certificate_pdf_url) ev.stopPropagation(); }}
-            >
-              {e.certificate_id}
-            </a>
-          </span>
-        )
-        : <span className="text-muted-foreground">—</span>,
-    },
-    {
-      key: 'certificate_expires_at', label: 'Renewal',
-      searchText: (e) => [e.certificate_expires_at || ''],
-      render: (e) => {
-        if (!e.certificate_expires_at) return <span className="text-muted-foreground">—</span>;
-        const r = renewalBadge(e.certificate_expires_at);
-        return <Badge variant="outline" className={r.cls}>{r.label}</Badge>;
-      },
-    },
   ];
+
+  if (showCerts) {
+    columns.push(
+      {
+        key: 'certificate_id', label: 'Certificate',
+        searchText: (e) => [e.certificate_id || ''],
+        render: (e) => e.certificate_id
+          ? (
+            <span className="inline-flex items-center gap-1 text-xs">
+              <Award className="h-3.5 w-3.5 text-success" />
+              <a
+                href={e.certificate_pdf_url || '#'}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline"
+                onClick={(ev) => { if (!e.certificate_pdf_url) ev.stopPropagation(); }}
+              >
+                {e.certificate_id}
+              </a>
+            </span>
+          )
+          : <span className="text-muted-foreground">—</span>,
+      },
+      {
+        key: 'certificate_expires_at', label: 'Renewal',
+        searchText: (e) => [e.certificate_expires_at || ''],
+        render: (e) => {
+          if (!e.certificate_expires_at) return <span className="text-muted-foreground">—</span>;
+          const r = renewalBadge(e.certificate_expires_at);
+          return <Badge variant="outline" className={r.cls}>{r.label}</Badge>;
+        },
+      },
+    );
+  }
 
   return (
     <>

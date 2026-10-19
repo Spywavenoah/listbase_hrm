@@ -69,6 +69,27 @@ export default function MovementsPage() {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ ...EMPTY });
+  const [liveBefore, setLiveBefore] = useState<number | null>(null);
+
+  // Live "balance before" for the entry form: fetched when item + warehouse are chosen.
+  useEffect(() => {
+    let active = true;
+    if (!form.item_id || !form.warehouse_id) { setLiveBefore(null); return; }
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from('inventory_stock')
+          .select('quantity')
+          .eq('item_id', form.item_id)
+          .eq('warehouse_id', form.warehouse_id)
+          .maybeSingle();
+        if (active) setLiveBefore(data ? Number(data.quantity) || 0 : 0);
+      } catch {
+        if (active) setLiveBefore(0);
+      }
+    })();
+    return () => { active = false; };
+  }, [form.item_id, form.warehouse_id]);
 
   const load = useCallback(async () => {
     try {
@@ -104,6 +125,15 @@ export default function MovementsPage() {
 
   const isTransfer = form.type === 'TRANSFER';
   const needsCost = ['RECEIPT', 'OPENING', 'RETURN'].includes(form.type);
+
+  // Live balance preview for the entry form.
+  const enteredQty = form.quantity === '' ? null : Number(form.quantity);
+  const liveAfter = (() => {
+    if (liveBefore === null || enteredQty === null || !Number.isFinite(enteredQty)) return null;
+    if (form.type === 'ADJUSTMENT') return enteredQty; // counted quantity becomes the new balance
+    if (form.type === 'ISSUE' || form.type === 'TRANSFER') return liveBefore - enteredQty;
+    return liveBefore + enteredQty; // RECEIPT, OPENING, RETURN
+  })();
 
   const save = async () => {
     if (!form.item_id || !form.warehouse_id) { toast.error('Select an item and a warehouse'); return; }
@@ -173,14 +203,23 @@ export default function MovementsPage() {
     },
     {
       key: 'quantity',
-      label: 'Qty',
+      label: 'Qty Entered',
       render: (r) => {
         const q = Number(r.quantity);
         const cls = q < 0 ? 'text-destructive' : 'text-success';
         return <span className={`font-medium ${cls}`}>{q > 0 ? '+' : ''}{fmtQty(q)} {r.item?.uom}</span>;
       },
     },
-    { key: 'resulting_quantity', label: 'Balance', render: (r) => fmtQty(r.resulting_quantity) },
+    {
+      key: '_before',
+      label: 'Balance Before',
+      searchable: false,
+      render: (r) => {
+        const before = Number(r.resulting_quantity || 0) - Number(r.quantity || 0);
+        return fmtQty(before);
+      },
+    },
+    { key: 'resulting_quantity', label: 'Balance After', render: (r) => <span className="font-medium">{fmtQty(r.resulting_quantity)}</span> },
     { key: 'reference', label: 'Reference', render: (r) => r.reference || '—' },
     {
       key: 'performed_by_employee',
@@ -274,6 +313,24 @@ export default function MovementsPage() {
                 <Input type="date" value={form.movement_date} onChange={(e) => setForm({ ...form, movement_date: e.target.value })} />
               </div>
             </div>
+            {(liveBefore !== null || liveAfter !== null) && (
+              <div className="grid gap-4 sm:grid-cols-3 rounded-lg border border-border bg-muted/40 p-3 text-sm">
+                <div>
+                  <p className="text-xs text-muted-foreground">Balance before</p>
+                  <p className="font-medium">{liveBefore !== null ? fmtQty(liveBefore) : '—'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">{form.type === 'ADJUSTMENT' ? 'Counted qty' : 'Quantity entered'}</p>
+                  <p className="font-medium">{enteredQty !== null && Number.isFinite(enteredQty) ? fmtQty(enteredQty) : '—'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Balance after</p>
+                  <p className={`font-medium ${liveAfter !== null && liveAfter < 0 ? 'text-destructive' : ''}`}>
+                    {liveAfter !== null ? fmtQty(liveAfter) : '—'}
+                  </p>
+                </div>
+              </div>
+            )}
             <div className="grid gap-4 sm:grid-cols-3">
               <div className="space-y-1.5">
                 <Label>Reference</Label>

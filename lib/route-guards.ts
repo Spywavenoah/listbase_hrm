@@ -115,6 +115,7 @@ const RULES: Rule[] = [
   { re: /^\/inventory\/transfers/, guard: { anyPrivilege: ['inventory.move', 'inventory.manage'] } },
   { re: /^\/inventory\/reports/, guard: { anyPrivilege: ['inventory.view', 'inventory.manage'] } },
   { re: /^\/inventory(\/|$)/, guard: { anyPrivilege: ALL_INVENTORY_PRIVILEGES } },
+  { re: /^\/projects\/allowance-payments/, guard: { anyPrivilege: ['projects.allowance', 'projects.manage'] } },
   { re: /^\/projects\/allowances/, guard: { anyPrivilege: ['projects.allowance', 'projects.manage'] } },
   { re: /^\/projects\/reports/, guard: { anyPrivilege: ALL_PROJECT_PRIVILEGES } },
   { re: /^\/projects(\/|$)/, guard: { anyPrivilege: ALL_PROJECT_PRIVILEGES } },

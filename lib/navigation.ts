@@ -185,6 +185,7 @@ export const navSections: NavSection[] = [
     items: [
       { label: 'My Training', href: '/training/my', icon: GraduationCap, privilege: 'training.enroll' },
       { label: 'Courses', href: '/training', icon: GraduationCap, privilege: 'training.manage' },
+      { label: 'Enrollments', href: '/training/enrollments', icon: UserPlus, privilege: 'training.manage' },
       { label: 'Certifications', href: '/training/certifications', icon: Award, privilege: 'training.manage' },
     ],
   },
@@ -243,6 +244,7 @@ export const navSections: NavSection[] = [
       { label: 'Projects', href: '/projects', icon: MapPin, privileges: ALL_PROJECT_PRIVILEGES },
       { label: 'Workforce', href: '/projects/workforce', icon: Users, privileges: ALL_PROJECT_PRIVILEGES },
       { label: 'Offshore Allowance', href: '/projects/allowances', icon: Coins, privileges: ALL_PROJECT_PRIVILEGES },
+      { label: 'Allowance Payments', href: '/projects/allowance-payments', icon: Wallet, privilege: 'projects.allowance' },
       { label: 'Offshore Report', href: '/projects/reports', icon: ChartBar, privileges: ALL_PROJECT_PRIVILEGES },
     ],
   },

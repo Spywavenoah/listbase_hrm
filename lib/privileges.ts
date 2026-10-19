@@ -73,6 +73,7 @@ export const PRIVILEGE_CATEGORIES: PrivilegeCategory[] = [
     privileges: [
       { key: 'training.manage', label: 'Manage training', description: 'Manage courses and enrollments' },
       { key: 'training.enroll', label: 'Enrol in training', description: 'Self-enrol into courses and complete your own training' },
+      { key: 'training.certificates', label: 'View training certificates', description: 'Access issued training certificates (personal and organisation-wide). Off by default for all employees.' },
     ],
   },
   {
