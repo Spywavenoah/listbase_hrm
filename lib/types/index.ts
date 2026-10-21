@@ -347,6 +347,52 @@ export interface PerformanceReview {
   submitted_at: string | null;
 }
 
+export type AppraisalStatus =
+  | 'DRAFT'
+  | 'SCORING'
+  | 'PENDING_MD'
+  | 'COMPLETED'
+  | 'CANCELLED';
+
+export interface AppraisalArea {
+  id: string;
+  appraisal_id: string;
+  name: string;
+  description: string | null;
+  weight: number;
+  sort_order: number;
+  is_mandatory: boolean;
+  employee_score: number | null;
+  employee_justification: string | null;
+  manager_score: number | null;
+  manager_justification: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AppraisalCycle {
+  id: string;
+  employee_id: string;
+  reporting_manager_id: string | null;
+  md_id: string | null;
+  review_cycle: string;
+  period_start: string | null;
+  period_end: string | null;
+  status: AppraisalStatus;
+  allow_edit_areas: boolean;
+  employee_submitted_at: string | null;
+  manager_submitted_at: string | null;
+  final_rating: number | null;
+  verdict: string | null;
+  md_comments: string | null;
+  md_decided_at: string | null;
+  md_decided_by: string | null;
+  created_by: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface PrivilegeDefinition {
   id: string;
   key: string;

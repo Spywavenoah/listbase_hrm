@@ -65,6 +65,8 @@ export const PRIVILEGE_CATEGORIES: PrivilegeCategory[] = [
     label: 'Performance',
     privileges: [
       { key: 'performance.manage', label: 'Manage performance', description: 'View and manage all reviews and goals' },
+      { key: 'performance.appraisal', label: 'Manage employee appraisals', description: 'Create appraisals, define areas, push to MD and view all appraisals' },
+      { key: 'performance.appraisal_verdict', label: 'Give final appraisal verdict', description: 'Review completed appraisals and provide the MD final verdict' },
     ],
   },
   {

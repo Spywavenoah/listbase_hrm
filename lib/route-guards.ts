@@ -79,6 +79,8 @@ const RULES: Rule[] = [
   { re: /^\/payroll$/, guard: { privilege: 'payroll.manage' } },
   { re: /^\/payroll\/components/, guard: { privilege: 'payroll.settings' } },
   { re: /^\/payroll\/payslips/, guard: { anyPrivilege: ['payroll.manage', 'payroll.settings'] } },
+  { re: /^\/performance\/my-appraisals/, guard: {} },
+  { re: /^\/performance\/appraisals/, guard: {} },
   { re: /^\/performance(\/|$)/, guard: { privilege: 'performance.manage' } },
   { re: /^\/training\/(enrollments|certifications|competencies)/, guard: { privilege: 'training.manage' } },
   { re: /^\/training\/my/, guard: { privilege: 'training.enroll' } },
@@ -125,7 +127,7 @@ const RULES: Rule[] = [
   { re: /^\/settings\/audit-log/, guard: { privilege: 'admin.audit' } },
   { re: /^\/settings\/attendance-geofence/, guard: { anyPrivilege: ['attendance.manage', 'admin.settings'] } },
   {
-    re: /^\/settings\/(branding|company|payments|smtp|templates|email-queue|fields|workflows|onboarding-templates|scheduler|security|network-schedule|performance|whatsapp)/,
+    re: /^\/settings\/(branding|company|payments|smtp|templates|letterheads|email-queue|fields|workflows|onboarding-templates|scheduler|security|network-schedule|performance|whatsapp)/,
     guard: { privilege: 'admin.settings' },
   },
 ];

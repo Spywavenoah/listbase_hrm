@@ -41,6 +41,7 @@ import {
   FolderKanban,
   MapPin,
   Coins,
+  FileSignature,
 } from 'lucide-react';
 
 export interface NavItem {
@@ -177,6 +178,8 @@ export const navSections: NavSection[] = [
     items: [
       { label: 'Reviews', href: '/performance', icon: Target, privilege: 'performance.manage' },
       { label: 'Goals', href: '/performance/goals', icon: Target, privilege: 'performance.manage' },
+      { label: 'Appraisals', href: '/performance/appraisals', icon: FileSignature, privilege: 'performance.appraisal' },
+      { label: 'My Appraisals', href: '/performance/my-appraisals', icon: FileSignature },
     ],
   },
   {
@@ -267,7 +270,18 @@ export const navSections: NavSection[] = [
       { label: 'Email (SMTP)', href: '/settings/smtp', icon: Mail, privilege: 'admin.settings' },
       { label: 'WhatsApp Attendance', href: '/settings/whatsapp', icon: MessageSquare, privilege: 'admin.settings' },
       { label: 'Attendance Geofences', href: '/settings/attendance-geofence', icon: MapPin, privileges: ['attendance.manage', 'admin.settings'] },
-      { label: 'Mail Templates', href: '/settings/templates', icon: FileText, privilege: 'admin.settings' },
+    {
+      label: 'Mail Templates',
+      href: '/settings/templates',
+      icon: FileText,
+      privilege: 'admin.settings'
+    },
+    {
+      label: 'Letterheads',
+      href: '/settings/letterheads',
+      icon: FileSignature,
+      privilege: 'admin.settings'
+    },
       { label: 'Email Queue', href: '/settings/email-queue', icon: Send, privilege: 'admin.settings' },
       { label: 'Field Builder', href: '/settings/fields', icon: Wrench, privilege: 'admin.settings' },
       { label: 'Workflows', href: '/settings/workflows', icon: ArrowRightLeft, privilege: 'admin.settings' },

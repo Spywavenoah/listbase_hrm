@@ -18761,9 +18761,6 @@ BEGIN
   END IF;
 
   v_days_count := array_length(p_day_nos, 1);
-  IF v_days_count > 4 THEN
-    RAISE EXCEPTION 'You can pay a maximum of 4 days at a time';
-  END IF;
 
   v_emp_count := array_length(p_employee_ids, 1);
   v_currency := v_cycle.currency;
@@ -18814,333 +18811,1285 @@ GRANT EXECUTE ON FUNCTION public.create_offshore_allowance_cycle(uuid, text, dat
 GRANT EXECUTE ON FUNCTION public.record_offshore_allowance_payment(uuid, uuid[], integer[], text, date, text, text, text) TO authenticated;
 
 -- ===========================================================================
--- 20261018000002_offshore_cycle_project_driven.sql
+-- 20261018000006_employee_annual_salary.sql
 -- ===========================================================================
 
 -- ============================================================
--- Migration 26 — Offshore allowance cycles become project-driven.
+-- Migration 29 — Annual salary field and payroll uses annual/12
 --
--- The cycle length is derived from start/end dates (not hand-entered). Each
--- employee's entitlement is the number of days they actually worked on the
--- project within that window (from project_workforce deployments), and the
--- amount due is worked_days x the project's allowance rate. The rate may
--- differ per project (and several can be configured for one project), so the
--- caller resolves it and passes the per-employee worked days + rate in.
---
--- Also tightens record_offshore_allowance_payment so a day can only be paid
--- if the employee actually has that day in their entitlement ledger.
+-- Adds employees.annual_salary. Payroll preview/generate will derive
+-- monthly_salary as annual_salary/12 when present, otherwise use
+-- employees.monthly_salary as before.
 -- ============================================================
 
--- ------------------------------------------------------------
--- RPC: create a project-driven cycle with per-employee worked days.
---   p_employees: JSON array of { "employee_id": uuid, "worked_days": int, "day_rate": numeric }
--- ------------------------------------------------------------
-DROP FUNCTION IF EXISTS public.create_offshore_allowance_cycle(uuid, text, date, integer, text, uuid[], numeric);
-DROP FUNCTION IF EXISTS public.create_offshore_allowance_cycle(uuid, text, date, date, text, jsonb);
-CREATE OR REPLACE FUNCTION public.create_offshore_allowance_cycle(
-  p_project_id uuid,
-  p_name text,
-  p_start_date date,
-  p_end_date date,
-  p_currency text,
-  p_employees jsonb
-) RETURNS uuid
+ALTER TABLE public.employees
+  ADD COLUMN IF NOT EXISTS annual_salary numeric;
+
+-- Update payroll preview to compute monthly_salary from annual_salary/12 if available
+CREATE OR REPLACE FUNCTION public.payroll_preview(
+  p_period_start date,
+  p_period_end date,
+  p_employee_ids uuid[] DEFAULT NULL
+)
+RETURNS TABLE (
+  employee_id uuid,
+  name text,
+  department text,
+  monthly_salary numeric,
+  working_days integer,
+  unpaid_days integer,
+  gross numeric,
+  tax numeric,
+  earnings_total numeric,
+  deductions_total numeric,
+  net numeric,
+  bonus_total numeric,
+  earnings jsonb,
+  deductions jsonb
+)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
-  v_cycle_id uuid;
-  v_total_days integer;
-  v_elem jsonb;
-  v_emp uuid;
-  v_worked integer;
-  v_rate numeric;
-  v_day integer;
+  v_tax_rate numeric := 0.10;
 BEGIN
-  IF NOT public.has_any_privilege(ARRAY['projects.allowance','projects.manage','admin.settings']) THEN
-    RAISE EXCEPTION 'You do not have permission to create offshore allowance cycles';
-  END IF;
-  IF p_project_id IS NULL THEN
-    RAISE EXCEPTION 'Select a project for the cycle';
-  END IF;
-  IF p_name IS NULL OR trim(p_name) = '' THEN
-    RAISE EXCEPTION 'Cycle name is required';
-  END IF;
-  IF p_start_date IS NULL OR p_end_date IS NULL THEN
-    RAISE EXCEPTION 'Start date and end date are required';
-  END IF;
-  IF p_end_date < p_start_date THEN
-    RAISE EXCEPTION 'End date cannot be before start date';
-  END IF;
-  IF p_employees IS NULL OR jsonb_array_length(p_employees) = 0 THEN
-    RAISE EXCEPTION 'Select at least one employee';
+  IF NOT public.has_privilege('payroll.manage') AND NOT public.has_privilege('payroll.view') THEN
+    RAISE EXCEPTION 'Not authorized to preview payroll';
   END IF;
 
-  v_total_days := (p_end_date - p_start_date) + 1;
+  SELECT COALESCE((value)::numeric, 10)/100 INTO v_tax_rate
+  FROM public.system_settings
+  WHERE group_name = 'payroll' AND key = 'tax_rate_pct'
+  LIMIT 1;
 
-  INSERT INTO public.offshore_allowance_cycles (project_id, name, start_date, end_date, total_days, currency, created_by)
-  VALUES (p_project_id, trim(p_name), p_start_date, p_end_date, v_total_days,
-          COALESCE(NULLIF(trim(p_currency),''),'USD'), public.current_employee_id())
-  RETURNING id INTO v_cycle_id;
-
-  FOR v_elem IN SELECT * FROM jsonb_array_elements(p_employees) LOOP
-    v_emp := (v_elem->>'employee_id')::uuid;
-    v_worked := COALESCE((v_elem->>'worked_days')::integer, 0);
-    v_rate := COALESCE((v_elem->>'day_rate')::numeric, 0);
-
-    IF v_emp IS NULL THEN
-      RAISE EXCEPTION 'Each employee entry needs an employee_id';
-    END IF;
-    IF v_worked < 1 OR v_worked > v_total_days THEN
-      RAISE EXCEPTION 'Worked days must be between 1 and % for the selected period', v_total_days;
-    END IF;
-    IF v_rate < 0 THEN
-      RAISE EXCEPTION 'Rate cannot be negative';
-    END IF;
-
-    INSERT INTO public.offshore_allowance_cycle_employees (cycle_id, employee_id, day_rate)
-    VALUES (v_cycle_id, v_emp, v_rate)
-    ON CONFLICT (cycle_id, employee_id) DO UPDATE SET day_rate = EXCLUDED.day_rate;
-
-    FOR v_day IN 1..v_worked LOOP
-      INSERT INTO public.offshore_allowance_day_ledger (cycle_id, employee_id, day_no, amount)
-      VALUES (v_cycle_id, v_emp, v_day, v_rate)
-      ON CONFLICT (cycle_id, employee_id, day_no) DO NOTHING;
-    END LOOP;
-  END LOOP;
-
-  RETURN v_cycle_id;
+  RETURN QUERY
+  WITH base AS (
+    SELECT
+      e.id AS employee_id,
+      trim(coalesce(e.first_name,'') || ' ' || coalesce(e.last_name,'')) AS name,
+      d.name AS department,
+      COALESCE(e.annual_salary/12, e.monthly_salary, 0) AS monthly_salary,
+      GREATEST(1, (p_period_end - p_period_start + 1)) AS period_days,
+      (SELECT COUNT(*)::int
+         FROM public.holidays h
+        WHERE h.holiday_date BETWEEN p_period_start AND p_period_end
+          AND h.is_active) AS holidays_in_period
+    FROM public.employees e
+    LEFT JOIN public.departments d ON d.id = e.department_id
+    WHERE e.employment_status IN ('ACTIVE','PROBATION')
+      AND (p_employee_ids IS NULL OR e.id = ANY(p_employee_ids))
+  ),
+  leave_unpaid AS (
+    SELECT lr.employee_id, COUNT(*)::int AS unpaid_days
+    FROM public.leave_requests lr
+    WHERE lr.status = 'APPROVED'
+      AND lr.start_date <= p_period_end
+      AND lr.end_date >= p_period_start
+      AND COALESCE(lr.is_paid, true) = false
+    GROUP BY lr.employee_id
+  ),
+  adj_earn AS (
+    SELECT a.employee_id,
+           jsonb_agg(jsonb_build_object('name', a.name, 'amount', a.amount)) FILTER (WHERE a.type='EARNING') AS items,
+           COALESCE(SUM(a.amount) FILTER (WHERE a.type='EARNING'), 0) AS total
+    FROM public.payroll_adjustments a
+    WHERE a.is_active
+      AND a.effective_from <= p_period_end
+      AND (a.effective_to IS NULL OR a.effective_to >= p_period_start)
+    GROUP BY a.employee_id
+  ),
+  adj_ded AS (
+    SELECT a.employee_id,
+           jsonb_agg(jsonb_build_object('name', a.name, 'amount', a.amount)) FILTER (WHERE a.type='DEDUCTION') AS items,
+           COALESCE(SUM(a.amount) FILTER (WHERE a.type='DEDUCTION'), 0) AS total
+    FROM public.payroll_adjustments a
+    WHERE a.is_active
+      AND a.effective_from <= p_period_end
+      AND (a.effective_to IS NULL OR a.effective_to >= p_period_start)
+    GROUP BY a.employee_id
+  ),
+  bonus AS (
+    SELECT b.employee_id, COALESCE(SUM(b.amount), 0) AS total
+    FROM public.bonus_master b
+    WHERE b.status = 'APPROVED'
+      AND b.payroll_run_id IS NULL
+      AND b.period_start <= p_period_end
+      AND b.period_end >= p_period_start
+    GROUP BY b.employee_id
+  )
+  SELECT
+    base.employee_id,
+    base.name,
+    base.department,
+    base.monthly_salary,
+    GREATEST(0, base.period_days - base.holidays_in_period)::int AS working_days,
+    COALESCE(leave_unpaid.unpaid_days, 0)::int AS unpaid_days,
+    ROUND(base.monthly_salary, 2) AS gross,
+    ROUND(base.monthly_salary * v_tax_rate, 2) AS tax,
+    ROUND(COALESCE(adj_earn.total,0) + COALESCE(bonus.total,0), 2) AS earnings_total,
+    ROUND(COALESCE(adj_ded.total,0), 2) AS deductions_total,
+    ROUND(base.monthly_salary + COALESCE(adj_earn.total,0) + COALESCE(bonus.total,0) - (base.monthly_salary * v_tax_rate) - COALESCE(adj_ded.total,0), 2) AS net,
+    ROUND(COALESCE(bonus.total,0), 2) AS bonus_total,
+    COALESCE(adj_earn.items, '[]'::jsonb) || COALESCE(
+      (SELECT jsonb_agg(jsonb_build_object('name', b2.description, 'amount', b2.amount))
+         FROM public.bonus_master b2
+        WHERE b2.employee_id = base.employee_id
+          AND b2.status = 'APPROVED'
+          AND b2.payroll_run_id IS NULL
+          AND b2.period_start <= p_period_end
+          AND b2.period_end >= p_period_start), '[]'::jsonb
+    ) AS earnings,
+    COALESCE(adj_ded.items, '[]'::jsonb) AS deductions
+  FROM base
+  LEFT JOIN leave_unpaid ON leave_unpaid.employee_id = base.employee_id
+  LEFT JOIN adj_earn ON adj_earn.employee_id = base.employee_id
+  LEFT JOIN adj_ded ON adj_ded.employee_id = base.employee_id
+  LEFT JOIN bonus ON bonus.employee_id = base.employee_id;
 END;
 $$;
 
--- ------------------------------------------------------------
--- Payment RPC: only allow paying days the employee is entitled to
--- (i.e. a ledger row exists), not just "not already paid".
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.record_offshore_allowance_payment(
-  p_cycle_id uuid,
-  p_employee_ids uuid[],
-  p_day_nos integer[],
-  p_reference text,
-  p_payment_date date,
-  p_notes text,
-  p_advice_path text,
-  p_advice_url text
-) RETURNS uuid
+-- Update generate_payroll_run to use same logic
+CREATE OR REPLACE FUNCTION public.generate_payroll_run(
+  p_name text,
+  p_period_start date,
+  p_period_end date,
+  p_employee_ids uuid[] DEFAULT NULL
+)
+RETURNS uuid
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
-  v_payment_id uuid;
-  v_cycle public.offshore_allowance_cycles%ROWTYPE;
-  v_days_count integer;
-  v_emp_count integer;
-  v_total numeric := 0;
-  v_emp uuid;
-  v_day integer;
-  v_rate numeric;
-  v_currency text;
+  v_run_id uuid;
+  v_tax_rate numeric := 0.10;
 BEGIN
-  IF NOT public.has_any_privilege(ARRAY['projects.allowance','projects.manage','admin.settings']) THEN
-    RAISE EXCEPTION 'You do not have permission to record offshore allowance payments';
+  IF NOT public.has_privilege('payroll.manage') THEN
+    RAISE EXCEPTION 'Not authorized to generate payroll runs';
   END IF;
 
-  SELECT * INTO v_cycle FROM public.offshore_allowance_cycles WHERE id = p_cycle_id FOR UPDATE;
-  IF NOT FOUND THEN
-    RAISE EXCEPTION 'Cycle not found';
-  END IF;
+  SELECT COALESCE((value)::numeric, 10)/100 INTO v_tax_rate
+  FROM public.system_settings
+  WHERE group_name = 'payroll' AND key = 'tax_rate_pct'
+  LIMIT 1;
 
-  IF p_employee_ids IS NULL OR array_length(p_employee_ids, 1) IS NULL THEN
-    RAISE EXCEPTION 'Select at least one employee';
-  END IF;
-  IF p_day_nos IS NULL OR array_length(p_day_nos, 1) IS NULL THEN
-    RAISE EXCEPTION 'Select at least one day';
-  END IF;
+  INSERT INTO public.payroll_runs (name, pay_period_start, pay_period_end, status, created_by)
+  VALUES (p_name, p_period_start, p_period_end, 'DRAFT', public.current_employee_id())
+  RETURNING id INTO v_run_id;
 
-  v_days_count := array_length(p_day_nos, 1);
-  IF v_days_count > 4 THEN
-    RAISE EXCEPTION 'You can pay a maximum of 4 days at a time';
-  END IF;
+  INSERT INTO public.payslips (
+    payroll_run_id, employee_id, period_start, period_end,
+    basic_salary, gross_pay, tax_amount, deductions_total, net_pay,
+    earnings_json, deductions_json, status
+  )
+  SELECT
+    v_run_id,
+    e.id,
+    p_period_start,
+    p_period_end,
+    COALESCE(e.annual_salary/12, e.monthly_salary, 0),
+    COALESCE(e.annual_salary/12, e.monthly_salary, 0) + COALESCE(ae.total,0) + COALESCE(b.total,0),
+    COALESCE(e.annual_salary/12, e.monthly_salary, 0) * v_tax_rate,
+    COALESCE(ad.total,0),
+    COALESCE(e.annual_salary/12, e.monthly_salary, 0) + COALESCE(ae.total,0) + COALESCE(b.total,0) - COALESCE(e.annual_salary/12, e.monthly_salary, 0) * v_tax_rate - COALESCE(ad.total,0),
+    COALESCE(ae.items, '[]'::jsonb) || COALESCE(b.items, '[]'::jsonb),
+    COALESCE(ad.items, '[]'::jsonb),
+    'PENDING'
+  FROM public.employees e
+  LEFT JOIN (
+    SELECT employee_id, SUM(amount) FILTER (WHERE type='EARNING') AS total,
+           jsonb_agg(jsonb_build_object('name', name, 'amount', amount)) FILTER (WHERE type='EARNING') AS items
+    FROM public.payroll_adjustments
+    WHERE is_active AND effective_from <= p_period_end AND (effective_to IS NULL OR effective_to >= p_period_start)
+    GROUP BY employee_id
+  ) ae ON ae.employee_id = e.id
+  LEFT JOIN (
+    SELECT employee_id, SUM(amount) FILTER (WHERE type='DEDUCTION') AS total,
+           jsonb_agg(jsonb_build_object('name', name, 'amount', amount)) FILTER (WHERE type='DEDUCTION') AS items
+    FROM public.payroll_adjustments
+    WHERE is_active AND effective_from <= p_period_end AND (effective_to IS NULL OR effective_to >= p_period_start)
+    GROUP BY employee_id
+  ) ad ON ad.employee_id = e.id
+  LEFT JOIN (
+    SELECT employee_id, SUM(amount) AS total,
+           jsonb_agg(jsonb_build_object('name', description, 'amount', amount)) AS items
+    FROM public.bonus_master
+    WHERE status = 'APPROVED' AND payroll_run_id IS NULL AND period_start <= p_period_end AND period_end >= p_period_start
+    GROUP BY employee_id
+  ) b ON b.employee_id = e.id
+  WHERE e.employment_status IN ('ACTIVE','PROBATION')
+    AND (p_employee_ids IS NULL OR e.id = ANY(p_employee_ids));
 
-  v_emp_count := array_length(p_employee_ids, 1);
-  v_currency := v_cycle.currency;
+  UPDATE public.bonus_master
+  SET payroll_run_id = v_run_id, status = 'PAID'
+  WHERE status = 'APPROVED'
+    AND payroll_run_id IS NULL
+    AND period_start <= p_period_end
+    AND period_end >= p_period_start;
 
-  -- Validate every (employee, day) exists in the entitlement ledger and is unpaid.
-  FOREACH v_emp IN ARRAY p_employee_ids LOOP
-    FOREACH v_day IN ARRAY p_day_nos LOOP
-      SELECT amount INTO v_rate
-        FROM public.offshore_allowance_day_ledger
-       WHERE cycle_id = p_cycle_id AND employee_id = v_emp AND day_no = v_day;
-      IF NOT FOUND THEN
-        RAISE EXCEPTION 'Day % is not part of this employee''s entitlement', v_day;
-      END IF;
-      IF EXISTS (
-        SELECT 1 FROM public.offshore_allowance_day_ledger
-         WHERE cycle_id = p_cycle_id AND employee_id = v_emp AND day_no = v_day AND status = 'PAID'
-      ) THEN
-        RAISE EXCEPTION 'Day % is already paid for an employee', v_day;
-      END IF;
-      v_total := v_total + COALESCE(v_rate, 0);
-    END LOOP;
-  END LOOP;
-
-  INSERT INTO public.offshore_allowance_payments (
-    cycle_id, reference, payment_date, days_count, employee_count,
-    total_amount, currency, notes, advice_path, advice_url, created_by
-  ) VALUES (
-    p_cycle_id, NULLIF(trim(p_reference),''), COALESCE(p_payment_date, CURRENT_DATE), v_days_count, v_emp_count,
-    v_total, v_currency, NULLIF(trim(p_notes),''), p_advice_path, p_advice_url, public.current_employee_id()
-  ) RETURNING id INTO v_payment_id;
-
-  UPDATE public.offshore_allowance_day_ledger
-     SET status = 'PAID', payment_id = v_payment_id, paid_at = now()
-   WHERE cycle_id = p_cycle_id
-     AND employee_id = ANY(p_employee_ids)
-     AND day_no = ANY(p_day_nos)
-     AND status = 'PENDING';
-
-  RETURN v_payment_id;
+  RETURN v_run_id;
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.create_offshore_allowance_cycle(uuid, text, date, date, text, jsonb) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.record_offshore_allowance_payment(uuid, uuid[], integer[], text, date, text, text, text) TO authenticated;
-
 -- ===========================================================================
--- 20261018000003_offshore_cycle_server_computed.sql
+-- 20261018000007_employee_appraisal_module.sql
 -- ===========================================================================
 
--- ============================================================
--- Migration 27 — Offshore cycle creation becomes server-authoritative and
--- double-payment safe.
---
--- The server now derives each selected employee's worked DATES from
--- project_workforce (matching the requested start/end window, including
--- shuffle-created rows), resolves the project's allowance rate itself, and
--- excludes any day that is already PAID in another cycle for the same project
--- and employee. Ledger rows carry the real calendar date (day_date) so the
--- "already paid" check is exact.
--- ============================================================
+/*
+# Employee Appraisal Module
 
--- Store the real calendar date worked on each ledger day.
-ALTER TABLE public.offshore_allowance_day_ledger
-  ADD COLUMN IF NOT EXISTS day_date date;
+A full multi-party appraisal workflow:
 
--- ------------------------------------------------------------
--- RPC: create a project-driven cycle (server computes worked dates + rate,
--- and never re-pays a day that is already paid for the same project+employee).
--- ------------------------------------------------------------
-DROP FUNCTION IF EXISTS public.create_offshore_allowance_cycle(uuid, text, date, date, text, jsonb);
-DROP FUNCTION IF EXISTS public.create_offshore_allowance_cycle(uuid, text, date, date, text, uuid[]);
-CREATE OR REPLACE FUNCTION public.create_offshore_allowance_cycle(
-  p_project_id uuid,
-  p_name text,
-  p_start_date date,
-  p_end_date date,
-  p_currency text,
-  p_employee_ids uuid[]
-) RETURNS uuid
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-  v_cycle_id uuid;
-  v_total_days integer;
-  v_rate numeric := 0;
-  v_currency text;
-  v_emp uuid;
-  v_n integer;
-  v_added integer := 0;
+  1. HR/Admin creates an appraisal for an employee and defines the areas
+     (sections) the employee is being appraised on. Each area has an optional
+     weight and is scored 1-5 with a justification by each party.
+  2. The employee and their reporting manager (HOD) each score every area and
+     provide a justification.
+  3. HR/Admin can optionally allow the employee and reporting manager to add
+     and edit the appraisal areas (`allow_edit_areas` flag).
+  4. When both parties have submitted, HR pushes the appraisal to the MD for a
+     final verdict (final rating + verdict + comments).
+  5. All parties (employee, reporting manager, HR/Admin) are notified and given
+     access to the appraisal form; progress notifications are sent to the
+     reporting manager, HR and admins.
+
+Tables:
+  * appraisal_cycles  — an appraisal instance for one employee in one period.
+  * appraisal_areas   — the scored areas/sections belonging to a cycle.
+
+Privileges: performance.appraisal (HR/admin manage + push to MD),
+            performance.appraisal_verdict (MD final verdict).
+*/
+
+-- ============================================================
+-- 1. Privilege catalog entries
+-- ============================================================
+INSERT INTO privilege_definitions (key, category, label, description, sort_order) VALUES
+  ('performance.appraisal',         'Performance', 'Manage employee appraisals', 'Create appraisals, define areas, push to MD and view all appraisals', 111),
+  ('performance.appraisal_verdict', 'Performance', 'Give final appraisal verdict', 'Review completed appraisals and provide the MD final verdict', 112)
+ON CONFLICT (key) DO NOTHING;
+
+-- ============================================================
+-- 2. Tables
+-- ============================================================
+CREATE TABLE IF NOT EXISTS appraisal_cycles (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  employee_id uuid NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  reporting_manager_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  md_id uuid REFERENCES employees(id) ON DELETE SET NULL,
+  review_cycle text NOT NULL,
+  period_start date,
+  period_end date,
+  status text NOT NULL DEFAULT 'DRAFT',
+    -- DRAFT | SCORING | PENDING_MD | COMPLETED | CANCELLED
+  allow_edit_areas boolean NOT NULL DEFAULT false,
+  employee_submitted_at timestamptz,
+  manager_submitted_at timestamptz,
+  final_rating numeric,
+  verdict text,
+  md_comments text,
+  md_decided_at timestamptz,
+  md_decided_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  created_by uuid REFERENCES employees(id) ON DELETE SET NULL,
+  notes text,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_appraisal_cycles_employee ON appraisal_cycles (employee_id);
+CREATE INDEX IF NOT EXISTS idx_appraisal_cycles_manager ON appraisal_cycles (reporting_manager_id);
+CREATE INDEX IF NOT EXISTS idx_appraisal_cycles_status ON appraisal_cycles (status);
+
+CREATE TABLE IF NOT EXISTS appraisal_areas (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  appraisal_id uuid NOT NULL REFERENCES appraisal_cycles(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  description text,
+  weight numeric NOT NULL DEFAULT 1,
+  sort_order integer NOT NULL DEFAULT 0,
+  employee_score numeric,
+  employee_justification text,
+  manager_score numeric,
+  manager_justification text,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_appraisal_areas_appraisal ON appraisal_areas (appraisal_id, sort_order);
+
+-- ============================================================
+-- 3. updated_at triggers
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.touch_appraisal_cycles_updated_at()
+RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF NOT public.has_any_privilege(ARRAY['projects.allowance','projects.manage','admin.settings']) THEN
-    RAISE EXCEPTION 'You do not have permission to create offshore allowance cycles';
-  END IF;
-  IF p_project_id IS NULL THEN
-    RAISE EXCEPTION 'Select a project for the cycle';
-  END IF;
-  IF p_name IS NULL OR trim(p_name) = '' THEN
-    RAISE EXCEPTION 'Cycle name is required';
-  END IF;
-  IF p_start_date IS NULL OR p_end_date IS NULL THEN
-    RAISE EXCEPTION 'Start date and end date are required';
-  END IF;
-  IF p_end_date < p_start_date THEN
-    RAISE EXCEPTION 'End date cannot be before start date';
-  END IF;
-  IF p_employee_ids IS NULL OR array_length(p_employee_ids, 1) IS NULL THEN
-    RAISE EXCEPTION 'Select at least one employee';
-  END IF;
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
 
-  v_total_days := (p_end_date - p_start_date) + 1;
+DROP TRIGGER IF EXISTS trg_touch_appraisal_cycles ON appraisal_cycles;
+CREATE TRIGGER trg_touch_appraisal_cycles
+  BEFORE UPDATE ON appraisal_cycles
+  FOR EACH ROW EXECUTE FUNCTION public.touch_appraisal_cycles_updated_at();
 
-  -- Resolve the allowance rate in force on the cycle start date:
-  -- project-specific beats the global default, latest effective_from wins.
-  SELECT oa.amount, oa.currency INTO v_rate, v_currency
-    FROM public.offshore_allowances oa
-   WHERE oa.is_active
-     AND oa.effective_from <= p_start_date
-     AND (oa.effective_to IS NULL OR oa.effective_to >= p_start_date)
-     AND (oa.project_id IS NULL OR oa.project_id = p_project_id)
-   ORDER BY (oa.project_id IS NOT NULL) DESC, oa.effective_from DESC, oa.effective_to DESC NULLS LAST
-   LIMIT 1;
+CREATE OR REPLACE FUNCTION public.touch_appraisal_areas_updated_at()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
 
-  v_rate := COALESCE(v_rate, 0);
-  v_currency := COALESCE(NULLIF(trim(p_currency), ''), NULLIF(v_currency, ''), 'USD');
+DROP TRIGGER IF EXISTS trg_touch_appraisal_areas ON appraisal_areas;
+CREATE TRIGGER trg_touch_appraisal_areas
+  BEFORE UPDATE ON appraisal_areas
+  FOR EACH ROW EXECUTE FUNCTION public.touch_appraisal_areas_updated_at();
 
-  INSERT INTO public.offshore_allowance_cycles (project_id, name, start_date, end_date, total_days, currency, created_by)
-  VALUES (p_project_id, trim(p_name), p_start_date, p_end_date, v_total_days, v_currency, public.current_employee_id())
-  RETURNING id INTO v_cycle_id;
+-- ============================================================
+-- 4. RLS
+-- ============================================================
+ALTER TABLE appraisal_cycles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE appraisal_areas ENABLE ROW LEVEL SECURITY;
 
-  FOREACH v_emp IN ARRAY p_employee_ids LOOP
-    -- Worked dates in the window, minus any day already paid for this
-    -- project + employee in another cycle. row_number() gives the day index.
-    INSERT INTO public.offshore_allowance_day_ledger (cycle_id, employee_id, day_no, day_date, amount)
-    SELECT v_cycle_id,
-           v_emp,
-           row_number() OVER (ORDER BY w.day)::integer,
-           w.day,
-           v_rate
-    FROM (
-      SELECT DISTINCT rd.day
-      FROM (SELECT generate_series(p_start_date, p_end_date, interval '1 day')::date AS day) rd
-      JOIN public.project_workforce pw
-        ON rd.day >= pw.start_date
-       AND (pw.end_date IS NULL OR rd.day <= pw.end_date)
-       AND pw.project_id = p_project_id
-       AND pw.employee_id = v_emp
-      WHERE NOT EXISTS (
-        SELECT 1
-          FROM public.offshore_allowance_day_ledger l
-          JOIN public.offshore_allowance_cycles c2 ON c2.id = l.cycle_id
-         WHERE c2.project_id = p_project_id
-           AND l.employee_id = v_emp
-           AND l.day_date = rd.day
-           AND l.status = 'PAID'
+DROP POLICY IF EXISTS "select_appraisal_cycles" ON appraisal_cycles;
+DROP POLICY IF EXISTS "insert_appraisal_cycles" ON appraisal_cycles;
+DROP POLICY IF EXISTS "update_appraisal_cycles" ON appraisal_cycles;
+DROP POLICY IF EXISTS "delete_appraisal_cycles" ON appraisal_cycles;
+
+-- Readable by: the employee, their reporting manager, the MD, and HR/admin
+-- (performance.appraisal) or a verdict holder.
+CREATE POLICY "select_appraisal_cycles" ON appraisal_cycles FOR SELECT TO authenticated
+  USING (
+    employee_id = public.current_employee_id()
+    OR reporting_manager_id = public.current_employee_id()
+    OR md_id = public.current_employee_id()
+    OR public.has_privilege('performance.appraisal')
+    OR public.has_privilege('performance.appraisal_verdict')
+  );
+
+CREATE POLICY "insert_appraisal_cycles" ON appraisal_cycles FOR INSERT TO authenticated
+  WITH CHECK (public.has_privilege('performance.appraisal'));
+
+-- The employee may update their own scores/areas (limited by RPC for safety),
+-- the manager theirs, and HR/admin anything.
+CREATE POLICY "update_appraisal_cycles" ON appraisal_cycles FOR UPDATE TO authenticated
+  USING (
+    employee_id = public.current_employee_id()
+    OR reporting_manager_id = public.current_employee_id()
+    OR public.has_privilege('performance.appraisal')
+    OR (md_id = public.current_employee_id() AND public.has_privilege('performance.appraisal_verdict'))
+  )
+  WITH CHECK (
+    employee_id = public.current_employee_id()
+    OR reporting_manager_id = public.current_employee_id()
+    OR public.has_privilege('performance.appraisal')
+    OR (md_id = public.current_employee_id() AND public.has_privilege('performance.appraisal_verdict'))
+  );
+
+CREATE POLICY "delete_appraisal_cycles" ON appraisal_cycles FOR DELETE TO authenticated
+  USING (public.has_privilege('performance.appraisal'));
+
+DROP POLICY IF EXISTS "select_appraisal_areas" ON appraisal_areas;
+DROP POLICY IF EXISTS "insert_appraisal_areas" ON appraisal_areas;
+DROP POLICY IF EXISTS "update_appraisal_areas" ON appraisal_areas;
+DROP POLICY IF EXISTS "delete_appraisal_areas" ON appraisal_areas;
+
+CREATE POLICY "select_appraisal_areas" ON appraisal_areas FOR SELECT TO authenticated
+  USING (EXISTS (
+    SELECT 1 FROM appraisal_cycles c
+    WHERE c.id = appraisal_areas.appraisal_id
+      AND (
+        c.employee_id = public.current_employee_id()
+        OR c.reporting_manager_id = public.current_employee_id()
+        OR c.md_id = public.current_employee_id()
+        OR public.has_privilege('performance.appraisal')
+        OR public.has_privilege('performance.appraisal_verdict')
       )
-    ) w
-    ON CONFLICT (cycle_id, employee_id, day_no) DO NOTHING;
+  ));
 
-    GET DIAGNOSTICS v_n = ROW_COUNT;
-    IF v_n > 0 THEN
-      INSERT INTO public.offshore_allowance_cycle_employees (cycle_id, employee_id, day_rate)
-      VALUES (v_cycle_id, v_emp, v_rate)
-      ON CONFLICT (cycle_id, employee_id) DO UPDATE SET day_rate = EXCLUDED.day_rate;
-      v_added := v_added + 1;
-    END IF;
-  END LOOP;
+-- Areas are written only through the RPCs below; allow INSERT/UPDATE/DELETE for
+-- HR/admin and (when allow_edit_areas) the employee/manager via the RPC, which
+-- runs SECURITY DEFINER. Direct table writes are gated to HR/admin only.
+CREATE POLICY "insert_appraisal_areas" ON appraisal_areas FOR INSERT TO authenticated
+  WITH CHECK (EXISTS (
+    SELECT 1 FROM appraisal_cycles c
+    WHERE c.id = appraisal_areas.appraisal_id
+      AND (
+        public.has_privilege('performance.appraisal')
+        OR ((c.employee_id = public.current_employee_id() OR c.reporting_manager_id = public.current_employee_id())
+            AND c.allow_edit_areas)
+      )
+  ));
 
-  IF v_added = 0 THEN
-    RAISE EXCEPTION 'None of the selected employees have any unpaid worked days in this period (they may already be paid)';
+CREATE POLICY "update_appraisal_areas" ON appraisal_areas FOR UPDATE TO authenticated
+  USING (EXISTS (
+    SELECT 1 FROM appraisal_cycles c
+    WHERE c.id = appraisal_areas.appraisal_id
+      AND (
+        public.has_privilege('performance.appraisal')
+        OR ((c.employee_id = public.current_employee_id() OR c.reporting_manager_id = public.current_employee_id())
+            AND c.allow_edit_areas)
+      )
+  ))
+  WITH CHECK (EXISTS (
+    SELECT 1 FROM appraisal_cycles c
+    WHERE c.id = appraisal_areas.appraisal_id
+      AND (
+        public.has_privilege('performance.appraisal')
+        OR ((c.employee_id = public.current_employee_id() OR c.reporting_manager_id = public.current_employee_id())
+            AND c.allow_edit_areas)
+      )
+  ));
+
+CREATE POLICY "delete_appraisal_areas" ON appraisal_areas FOR DELETE TO authenticated
+  USING (EXISTS (
+    SELECT 1 FROM appraisal_cycles c
+    WHERE c.id = appraisal_areas.appraisal_id
+      AND (
+        public.has_privilege('performance.appraisal')
+        OR ((c.employee_id = public.current_employee_id() OR c.reporting_manager_id = public.current_employee_id())
+            AND c.allow_edit_areas
+            AND c.status = 'SCORING')
+      )
+  ));
+
+-- ============================================================
+-- 5. Helper: compute weighted average of scores present
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.appraisal_weighted_avg(p_appraisal_id uuid, p_party text)
+RETURNS numeric
+LANGUAGE sql
+STABLE
+SET search_path = public
+AS $$
+  SELECT ROUND(
+    SUM(
+      CASE WHEN p_party = 'manager' THEN COALESCE(a.manager_score, 0)
+           ELSE COALESCE(a.employee_score, 0) END * COALESCE(a.weight, 1)
+    )
+    / NULLIF(SUM(COALESCE(a.weight, 1)), 0),
+    2)
+  FROM appraisal_areas a
+  WHERE a.appraisal_id = p_appraisal_id;
+$$;
+
+-- ============================================================
+-- 6. RPCs
+-- ============================================================
+
+-- 6a. Create an appraisal (HR/admin). Optionally set reporting manager (defaults
+--     to the employee's reporting_manager_id) and MD.
+CREATE OR REPLACE FUNCTION public.create_appraisal(
+  p_employee_id uuid,
+  p_review_cycle text,
+  p_period_start date DEFAULT NULL,
+  p_period_end date DEFAULT NULL,
+  p_reporting_manager_id uuid DEFAULT NULL,
+  p_md_id uuid DEFAULT NULL,
+  p_allow_edit_areas boolean DEFAULT false,
+  p_notes text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_id uuid;
+  v_manager uuid;
+  v_employee employees;
+  v_emp_name text;
+BEGIN
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    RAISE EXCEPTION 'Not authorized to create appraisals';
   END IF;
 
-  RETURN v_cycle_id;
+  IF p_employee_id IS NULL THEN
+    RAISE EXCEPTION 'Employee is required';
+  END IF;
+
+  SELECT * INTO v_employee FROM employees WHERE id = p_employee_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Employee not found';
+  END IF;
+
+  v_manager := COALESCE(p_reporting_manager_id, v_employee.reporting_manager_id);
+  IF v_manager = p_employee_id THEN
+    v_manager := NULL;
+  END IF;
+
+  INSERT INTO appraisal_cycles (
+    employee_id, reporting_manager_id, md_id, review_cycle,
+    period_start, period_end, status, allow_edit_areas, notes, created_by
+  ) VALUES (
+    p_employee_id, v_manager, p_md_id, p_review_cycle,
+    p_period_start, p_period_end, 'SCORING', COALESCE(p_allow_edit_areas, false),
+    p_notes, public.current_employee_id()
+  )
+  RETURNING id INTO v_id;
+
+  v_emp_name := trim(coalesce(v_employee.first_name,'') || ' ' || coalesce(v_employee.last_name,''));
+
+  -- Notify the employee (point 1 & 3)
+  PERFORM public.create_notification(
+    p_employee_id,
+    'New appraisal created',
+    'An appraisal for "' || p_review_cycle || '" has been created. You can add your scores and justifications.',
+    'INFO',
+    '/performance/appraisals/' || v_id,
+    jsonb_build_object('kind', 'appraisal_created', 'appraisal_id', v_id)
+  );
+
+  -- Notify the reporting manager / HOD (point 3)
+  IF v_manager IS NOT NULL THEN
+    PERFORM public.create_notification(
+      v_manager,
+      'Appraisal to score',
+      'You have been assigned as the reporting manager for ' || v_emp_name || '''s "' || p_review_cycle || '" appraisal.',
+      'INFO',
+      '/performance/appraisals/' || v_id,
+      jsonb_build_object('kind', 'appraisal_assigned', 'appraisal_id', v_id)
+    );
+  END IF;
+
+  -- Notify the MD if set
+  IF p_md_id IS NOT NULL THEN
+    PERFORM public.create_notification(
+      p_md_id,
+      'Appraisal assigned for final verdict',
+      'You have been assigned to give the final verdict for ' || v_emp_name || '''s "' || p_review_cycle || '" appraisal.',
+      'INFO',
+      '/performance/appraisals/' || v_id,
+      jsonb_build_object('kind', 'appraisal_md_assigned', 'appraisal_id', v_id)
+    );
+  END IF;
+
+  RETURN v_id;
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.create_offshore_allowance_cycle(uuid, text, date, date, text, uuid[]) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.create_appraisal(uuid, text, date, date, uuid, uuid, boolean, text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.create_appraisal(uuid, text, date, date, uuid, uuid, boolean, text) FROM PUBLIC;
+
+-- 6b. HR/admin: add a scored area to an appraisal.
+CREATE OR REPLACE FUNCTION public.add_appraisal_area(
+  p_appraisal_id uuid,
+  p_name text,
+  p_description text DEFAULT NULL,
+  p_weight numeric DEFAULT 1
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_id uuid;
+  v_order integer;
+  v_cycle appraisal_cycles;
+BEGIN
+  SELECT * INTO v_cycle FROM appraisal_cycles WHERE id = p_appraisal_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Appraisal not found'; END IF;
+
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    IF NOT (
+      v_cycle.allow_edit_areas
+      AND v_cycle.status = 'SCORING'
+      AND (v_cycle.employee_id = public.current_employee_id() OR v_cycle.reporting_manager_id = public.current_employee_id())
+    ) THEN
+      RAISE EXCEPTION 'Not authorized to add appraisal areas';
+    END IF;
+  END IF;
+
+  SELECT COALESCE(MAX(sort_order), 0) + 1 INTO v_order FROM appraisal_areas WHERE appraisal_id = p_appraisal_id;
+
+  INSERT INTO appraisal_areas (appraisal_id, name, description, weight, sort_order)
+  VALUES (p_appraisal_id, p_name, p_description, COALESCE(p_weight, 1), v_order)
+  RETURNING id INTO v_id;
+
+  RETURN v_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.add_appraisal_area(uuid, text, text, numeric) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.add_appraisal_area(uuid, text, text, numeric) FROM PUBLIC;
+
+-- 6c. HR/admin: update an area's definition (name/description/weight).
+CREATE OR REPLACE FUNCTION public.update_appraisal_area(
+  p_area_id uuid,
+  p_name text,
+  p_description text DEFAULT NULL,
+  p_weight numeric DEFAULT 1
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_cycle appraisal_cycles;
+BEGIN
+  SELECT c.* INTO v_cycle FROM appraisal_cycles c JOIN appraisal_areas a ON a.appraisal_id = c.id WHERE a.id = p_area_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Area not found'; END IF;
+
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    IF NOT (
+      v_cycle.allow_edit_areas
+      AND v_cycle.status = 'SCORING'
+      AND (v_cycle.employee_id = public.current_employee_id() OR v_cycle.reporting_manager_id = public.current_employee_id())
+    ) THEN
+      RAISE EXCEPTION 'Not authorized to edit appraisal areas';
+    END IF;
+  END IF;
+
+  UPDATE appraisal_areas
+     SET name = p_name, description = p_description, weight = COALESCE(p_weight, 1)
+   WHERE id = p_area_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_appraisal_area(uuid, text, text, numeric) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.update_appraisal_area(uuid, text, text, numeric) FROM PUBLIC;
+
+-- 6d. HR/admin: remove an area.
+CREATE OR REPLACE FUNCTION public.delete_appraisal_area(p_area_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_cycle appraisal_cycles;
+BEGIN
+  SELECT c.* INTO v_cycle FROM appraisal_cycles c JOIN appraisal_areas a ON a.appraisal_id = c.id WHERE a.id = p_area_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Area not found'; END IF;
+
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    IF NOT (
+      v_cycle.allow_edit_areas
+      AND v_cycle.status = 'SCORING'
+      AND (v_cycle.employee_id = public.current_employee_id() OR v_cycle.reporting_manager_id = public.current_employee_id())
+    ) THEN
+      RAISE EXCEPTION 'Not authorized to remove appraisal areas';
+    END IF;
+  END IF;
+
+  DELETE FROM appraisal_areas WHERE id = p_area_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.delete_appraisal_area(uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.delete_appraisal_area(uuid) FROM PUBLIC;
+
+-- 6e. HR/admin: toggle whether employee/manager may add & edit areas.
+CREATE OR REPLACE FUNCTION public.set_appraisal_edit_areas(p_appraisal_id uuid, p_allow boolean)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    RAISE EXCEPTION 'Not authorized';
+  END IF;
+  UPDATE appraisal_cycles SET allow_edit_areas = COALESCE(p_allow, false) WHERE id = p_appraisal_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.set_appraisal_edit_areas(uuid, boolean) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.set_appraisal_edit_areas(uuid, boolean) FROM PUBLIC;
+
+-- 6f. Employee or manager: submit their scores + justifications for all areas.
+--     p_party is 'employee' or 'manager'.
+CREATE OR REPLACE FUNCTION public.submit_appraisal_scores(
+  p_appraisal_id uuid,
+  p_party text,
+  p_scores jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_cycle appraisal_cycles;
+  v_caller uuid := public.current_employee_id();
+  v_item jsonb;
+  v_area_id uuid;
+  v_score numeric;
+  v_just text;
+  v_emp_name text;
+  v_manager_name text;
+  v_hr record;
+BEGIN
+  SELECT * INTO v_cycle FROM appraisal_cycles WHERE id = p_appraisal_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Appraisal not found'; END IF;
+
+  IF p_party NOT IN ('employee', 'manager') THEN
+    RAISE EXCEPTION 'Invalid party';
+  END IF;
+
+  IF p_party = 'employee' AND v_caller <> v_cycle.employee_id THEN
+    RAISE EXCEPTION 'Only the employee can submit their scores';
+  END IF;
+  IF p_party = 'manager' AND (v_cycle.reporting_manager_id IS NULL OR v_caller <> v_cycle.reporting_manager_id) THEN
+    RAISE EXCEPTION 'Only the reporting manager can submit their scores';
+  END IF;
+
+  IF v_cycle.status <> 'SCORING' THEN
+    RAISE EXCEPTION 'This appraisal is not open for scoring';
+  END IF;
+
+  FOR v_item IN SELECT * FROM jsonb_array_elements(COALESCE(p_scores, '[]'::jsonb))
+  LOOP
+    v_area_id := (v_item->>'area_id')::uuid;
+    v_score := NULLIF(v_item->>'score', '')::numeric;
+    v_just := v_item->>'justification';
+
+    IF p_party = 'employee' THEN
+      UPDATE appraisal_areas
+         SET employee_score = v_score, employee_justification = v_just
+       WHERE id = v_area_id AND appraisal_id = p_appraisal_id;
+    ELSE
+      UPDATE appraisal_areas
+         SET manager_score = v_score, manager_justification = v_just
+       WHERE id = v_area_id AND appraisal_id = p_appraisal_id;
+    END IF;
+  END LOOP;
+
+  IF p_party = 'employee' THEN
+    UPDATE appraisal_cycles SET employee_submitted_at = now() WHERE id = p_appraisal_id;
+  ELSE
+    UPDATE appraisal_cycles SET manager_submitted_at = now() WHERE id = p_appraisal_id;
+  END IF;
+
+  SELECT trim(coalesce(first_name,'') || ' ' || coalesce(last_name,'')) INTO v_emp_name
+    FROM employees WHERE id = v_cycle.employee_id;
+
+  -- Progress notifications (point 7): notify manager, HR/admin.
+  IF p_party = 'employee' THEN
+    IF v_cycle.reporting_manager_id IS NOT NULL THEN
+      PERFORM public.create_notification(
+        v_cycle.reporting_manager_id,
+        'Employee submitted appraisal scores',
+        v_emp_name || ' has submitted their scores for "' || v_cycle.review_cycle || '". Please add yours.',
+        'INFO',
+        '/performance/appraisals/' || p_appraisal_id,
+        jsonb_build_object('kind', 'appraisal_progress', 'appraisal_id', p_appraisal_id)
+      );
+    END IF;
+  ELSE
+    -- Manager done — notify the employee too.
+    PERFORM public.create_notification(
+      v_cycle.employee_id,
+      'Manager submitted appraisal scores',
+      'Your reporting manager has submitted their scores for "' || v_cycle.review_cycle || '".',
+      'INFO',
+      '/performance/appraisals/' || p_appraisal_id,
+      jsonb_build_object('kind', 'appraisal_progress', 'appraisal_id', p_appraisal_id)
+    );
+  END IF;
+
+  -- Notify HR/admin holders about progress.
+  FOR v_hr IN
+    SELECT ep.employee_id FROM employee_privileges ep
+    WHERE ep.privilege_key = 'performance.appraisal'
+      AND ep.employee_id <> v_caller
+  LOOP
+    PERFORM public.create_notification(
+      v_hr.employee_id,
+      'Appraisal progress update',
+      v_emp_name || '''s "' || v_cycle.review_cycle || '" appraisal: ' || p_party || ' scores submitted.',
+      'INFO',
+      '/performance/appraisals/' || p_appraisal_id,
+      jsonb_build_object('kind', 'appraisal_progress', 'appraisal_id', p_appraisal_id)
+    );
+  END LOOP;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.submit_appraisal_scores(uuid, text, jsonb) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.submit_appraisal_scores(uuid, text, jsonb) FROM PUBLIC;
+
+-- 6g. HR/admin: push a completed (both parties submitted) appraisal to MD.
+CREATE OR REPLACE FUNCTION public.push_appraisal_to_md(p_appraisal_id uuid, p_md_id uuid DEFAULT NULL)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_cycle appraisal_cycles;
+  v_md uuid;
+  v_emp_name text;
+  v_manager_name text;
+  v_emp_avg numeric;
+  v_mgr_avg numeric;
+BEGIN
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    RAISE EXCEPTION 'Not authorized to push appraisals to MD';
+  END IF;
+
+  SELECT * INTO v_cycle FROM appraisal_cycles WHERE id = p_appraisal_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Appraisal not found'; END IF;
+
+  IF v_cycle.employee_submitted_at IS NULL OR v_cycle.manager_submitted_at IS NULL THEN
+    RAISE EXCEPTION 'Both the employee and reporting manager must submit their scores first';
+  END IF;
+
+  v_md := COALESCE(p_md_id, v_cycle.md_id);
+  IF v_md IS NULL THEN
+    RAISE EXCEPTION 'A Managing Director must be selected';
+  END IF;
+  IF v_md = v_cycle.employee_id THEN
+    RAISE EXCEPTION 'The MD cannot be the employee being appraised';
+  END IF;
+
+  v_emp_avg := public.appraisal_weighted_avg(p_appraisal_id, 'employee');
+  v_mgr_avg := public.appraisal_weighted_avg(p_appraisal_id, 'manager');
+
+  SELECT trim(coalesce(first_name,'') || ' ' || coalesce(last_name,'')) INTO v_emp_name
+    FROM employees WHERE id = v_cycle.employee_id;
+  SELECT trim(coalesce(first_name,'') || ' ' || coalesce(last_name,'')) INTO v_manager_name
+    FROM employees WHERE id = v_cycle.reporting_manager_id;
+
+  UPDATE appraisal_cycles
+     SET status = 'PENDING_MD',
+         md_id = v_md
+   WHERE id = p_appraisal_id;
+
+  PERFORM public.create_notification(
+    v_md,
+    'Appraisal ready for final verdict',
+    v_emp_name || '''s "' || v_cycle.review_cycle || '" appraisal is ready for your final verdict.'
+      || ' Employee avg: ' || COALESCE(v_emp_avg::text, '-')
+      || ', Manager avg: ' || COALESCE(v_mgr_avg::text, '-') || '.',
+    'INFO',
+    '/performance/appraisals/' || p_appraisal_id,
+    jsonb_build_object('kind', 'appraisal_pending_md', 'appraisal_id', p_appraisal_id)
+  );
+
+  -- Notify employee + manager that it is with the MD.
+  PERFORM public.create_notification(
+    v_cycle.employee_id,
+    'Appraisal sent to MD',
+    'Your "' || v_cycle.review_cycle || '" appraisal has been sent to the Managing Director for final verdict.',
+    'INFO',
+    '/performance/appraisals/' || p_appraisal_id,
+    jsonb_build_object('kind', 'appraisal_progress', 'appraisal_id', p_appraisal_id)
+  );
+  IF v_cycle.reporting_manager_id IS NOT NULL THEN
+    PERFORM public.create_notification(
+      v_cycle.reporting_manager_id,
+      'Appraisal sent to MD',
+      v_emp_name || '''s "' || v_cycle.review_cycle || '" appraisal has been sent to the MD for final verdict.',
+      'INFO',
+      '/performance/appraisals/' || p_appraisal_id,
+      jsonb_build_object('kind', 'appraisal_progress', 'appraisal_id', p_appraisal_id)
+    );
+  END IF;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.push_appraisal_to_md(uuid, uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.push_appraisal_to_md(uuid, uuid) FROM PUBLIC;
+
+-- 6h. MD: give the final verdict.
+CREATE OR REPLACE FUNCTION public.give_appraisal_verdict(
+  p_appraisal_id uuid,
+  p_final_rating numeric,
+  p_verdict text,
+  p_comments text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_cycle appraisal_cycles;
+  v_emp_name text;
+  v_hr record;
+  v_caller uuid := public.current_employee_id();
+BEGIN
+  SELECT * INTO v_cycle FROM appraisal_cycles WHERE id = p_appraisal_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Appraisal not found'; END IF;
+
+  IF v_cycle.status <> 'PENDING_MD' THEN
+    RAISE EXCEPTION 'This appraisal is not awaiting a final verdict';
+  END IF;
+
+  IF v_caller <> v_cycle.md_id OR NOT public.has_privilege('performance.appraisal_verdict') THEN
+    RAISE EXCEPTION 'Only the assigned MD with verdict privilege can give a verdict';
+  END IF;
+
+  UPDATE appraisal_cycles
+     SET status = 'COMPLETED',
+         final_rating = p_final_rating,
+         verdict = p_verdict,
+         md_comments = p_comments,
+         md_decided_at = now(),
+         md_decided_by = v_caller
+   WHERE id = p_appraisal_id;
+
+  SELECT trim(coalesce(first_name,'') || ' ' || coalesce(last_name,'')) INTO v_emp_name
+    FROM employees WHERE id = v_cycle.employee_id;
+
+  PERFORM public.create_notification(
+    v_cycle.employee_id,
+    'Appraisal completed',
+    'Your "' || v_cycle.review_cycle || '" appraisal is complete. Final rating: ' || COALESCE(p_final_rating::text, '-') || '.',
+    'SUCCESS',
+    '/performance/appraisals/' || p_appraisal_id,
+    jsonb_build_object('kind', 'appraisal_completed', 'appraisal_id', p_appraisal_id)
+  );
+
+  IF v_cycle.reporting_manager_id IS NOT NULL THEN
+    PERFORM public.create_notification(
+      v_cycle.reporting_manager_id,
+      'Appraisal completed',
+      v_emp_name || '''s "' || v_cycle.review_cycle || '" appraisal has a final verdict.',
+      'SUCCESS',
+      '/performance/appraisals/' || p_appraisal_id,
+      jsonb_build_object('kind', 'appraisal_completed', 'appraisal_id', p_appraisal_id)
+    );
+  END IF;
+
+  FOR v_hr IN
+    SELECT ep.employee_id FROM employee_privileges ep
+    WHERE ep.privilege_key = 'performance.appraisal'
+      AND ep.employee_id <> v_caller
+  LOOP
+    PERFORM public.create_notification(
+      v_hr.employee_id,
+      'Appraisal completed',
+      v_emp_name || '''s "' || v_cycle.review_cycle || '" appraisal is complete.',
+      'SUCCESS',
+      '/performance/appraisals/' || p_appraisal_id,
+      jsonb_build_object('kind', 'appraisal_completed', 'appraisal_id', p_appraisal_id)
+    );
+  END LOOP;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.give_appraisal_verdict(uuid, numeric, text, text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.give_appraisal_verdict(uuid, numeric, text, text) FROM PUBLIC;
+
+-- 6i. HR/admin: cancel an appraisal.
+CREATE OR REPLACE FUNCTION public.cancel_appraisal(p_appraisal_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    RAISE EXCEPTION 'Not authorized';
+  END IF;
+  UPDATE appraisal_cycles SET status = 'CANCELLED' WHERE id = p_appraisal_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.cancel_appraisal(uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.cancel_appraisal(uuid) FROM PUBLIC;
+
+-- ===========================================================================
+-- 20261018000008_appraisal_mandatory_goals.sql
+-- ===========================================================================
+
+/*
+# Mandatory appraisal goals
+
+Every appraisal includes 3 mandatory, locked goals that cannot be edited or
+removed by anyone (including HR/admin):
+
+  1. HSE — Employee adherence to HSE policy and reporting of UAUC.
+  2. Values — Employee adherence and responsiveness to company Values
+     (Safety, Respect, Teamwork, Integrity, Creativity, Leadership and
+     Innovation).
+  3. Equipment & Tools — Employee's attitude towards company equipment and tools.
+
+Adds `appraisal_areas.is_mandatory`. Mandatory areas are seeded automatically
+when an appraisal is created and are protected from edit/delete in the RPCs.
+*/
+
+-- ============================================================
+-- 1. Column
+-- ============================================================
+ALTER TABLE appraisal_areas
+  ADD COLUMN IF NOT EXISTS is_mandatory boolean NOT NULL DEFAULT false;
+
+-- ============================================================
+-- 2. Backfill the 3 mandatory goals into existing appraisals
+-- ============================================================
+INSERT INTO appraisal_areas (appraisal_id, name, description, weight, sort_order, is_mandatory)
+SELECT c.id, g.name, g.description, 1, g.sort_order, true
+FROM appraisal_cycles c
+CROSS JOIN (VALUES
+  ('HSE', 'Employee adherence to HSE policy and reporting of UAUC', -3),
+  ('Values', 'Employee adherence and responsiveness to company Values (Safety, Respect, Teamwork, Integrity, Creativity, Leadership and Innovation)', -2),
+  ('Equipment & Tools', 'Employee''s attitude towards company equipment and tools', -1)
+) AS g(name, description, sort_order)
+WHERE NOT EXISTS (
+  SELECT 1 FROM appraisal_areas a
+  WHERE a.appraisal_id = c.id AND a.name = g.name AND a.is_mandatory
+);
+
+-- ============================================================
+-- 3. create_appraisal — seed mandatory goals
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.create_appraisal(
+  p_employee_id uuid,
+  p_review_cycle text,
+  p_period_start date DEFAULT NULL,
+  p_period_end date DEFAULT NULL,
+  p_reporting_manager_id uuid DEFAULT NULL,
+  p_md_id uuid DEFAULT NULL,
+  p_allow_edit_areas boolean DEFAULT false,
+  p_notes text DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_id uuid;
+  v_manager uuid;
+  v_employee employees;
+  v_emp_name text;
+BEGIN
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    RAISE EXCEPTION 'Not authorized to create appraisals';
+  END IF;
+
+  IF p_employee_id IS NULL THEN
+    RAISE EXCEPTION 'Employee is required';
+  END IF;
+
+  SELECT * INTO v_employee FROM employees WHERE id = p_employee_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Employee not found';
+  END IF;
+
+  v_manager := COALESCE(p_reporting_manager_id, v_employee.reporting_manager_id);
+  IF v_manager = p_employee_id THEN
+    v_manager := NULL;
+  END IF;
+
+  INSERT INTO appraisal_cycles (
+    employee_id, reporting_manager_id, md_id, review_cycle,
+    period_start, period_end, status, allow_edit_areas, notes, created_by
+  ) VALUES (
+    p_employee_id, v_manager, p_md_id, p_review_cycle,
+    p_period_start, p_period_end, 'SCORING', COALESCE(p_allow_edit_areas, false),
+    p_notes, public.current_employee_id()
+  )
+  RETURNING id INTO v_id;
+
+  -- Seed the 3 mandatory, locked goals for every appraisal.
+  INSERT INTO appraisal_areas (appraisal_id, name, description, weight, sort_order, is_mandatory) VALUES
+    (v_id, 'HSE', 'Employee adherence to HSE policy and reporting of UAUC', 1, 1, true),
+    (v_id, 'Values', 'Employee adherence and responsiveness to company Values (Safety, Respect, Teamwork, Integrity, Creativity, Leadership and Innovation)', 1, 2, true),
+    (v_id, 'Equipment & Tools', 'Employee''s attitude towards company equipment and tools', 1, 3, true);
+
+  v_emp_name := trim(coalesce(v_employee.first_name,'') || ' ' || coalesce(v_employee.last_name,''));
+
+  -- Notify the employee (point 1 & 3)
+  PERFORM public.create_notification(
+    p_employee_id,
+    'New appraisal created',
+    'An appraisal for "' || p_review_cycle || '" has been created. You can add your scores and justifications.',
+    'INFO',
+    '/performance/appraisals/' || v_id,
+    jsonb_build_object('kind', 'appraisal_created', 'appraisal_id', v_id)
+  );
+
+  -- Notify the reporting manager / HOD (point 3)
+  IF v_manager IS NOT NULL THEN
+    PERFORM public.create_notification(
+      v_manager,
+      'Appraisal to score',
+      'You have been assigned as the reporting manager for ' || v_emp_name || '''s "' || p_review_cycle || '" appraisal.',
+      'INFO',
+      '/performance/appraisals/' || v_id,
+      jsonb_build_object('kind', 'appraisal_assigned', 'appraisal_id', v_id)
+    );
+  END IF;
+
+  -- Notify the MD if set
+  IF p_md_id IS NOT NULL THEN
+    PERFORM public.create_notification(
+      p_md_id,
+      'Appraisal assigned for final verdict',
+      'You have been assigned to give the final verdict for ' || v_emp_name || '''s "' || p_review_cycle || '" appraisal.',
+      'INFO',
+      '/performance/appraisals/' || v_id,
+      jsonb_build_object('kind', 'appraisal_md_assigned', 'appraisal_id', v_id)
+    );
+  END IF;
+
+  RETURN v_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.create_appraisal(uuid, text, date, date, uuid, uuid, boolean, text) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.create_appraisal(uuid, text, date, date, uuid, uuid, boolean, text) FROM PUBLIC;
+
+-- ============================================================
+-- 4. add_appraisal_area — cannot add another mandatory row (only HR/normal)
+--    (mandatory rows are seeded internally, so users never add them)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.add_appraisal_area(
+  p_appraisal_id uuid,
+  p_name text,
+  p_description text DEFAULT NULL,
+  p_weight numeric DEFAULT 1
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_id uuid;
+  v_order integer;
+  v_cycle appraisal_cycles;
+BEGIN
+  SELECT * INTO v_cycle FROM appraisal_cycles WHERE id = p_appraisal_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Appraisal not found'; END IF;
+
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    IF NOT (
+      v_cycle.allow_edit_areas
+      AND v_cycle.status = 'SCORING'
+      AND (v_cycle.employee_id = public.current_employee_id() OR v_cycle.reporting_manager_id = public.current_employee_id())
+    ) THEN
+      RAISE EXCEPTION 'Not authorized to add appraisal areas';
+    END IF;
+  END IF;
+
+  SELECT COALESCE(MAX(sort_order), 0) + 1 INTO v_order FROM appraisal_areas WHERE appraisal_id = p_appraisal_id;
+
+  INSERT INTO appraisal_areas (appraisal_id, name, description, weight, sort_order, is_mandatory)
+  VALUES (p_appraisal_id, p_name, p_description, COALESCE(p_weight, 1), v_order, false)
+  RETURNING id INTO v_id;
+
+  RETURN v_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.add_appraisal_area(uuid, text, text, numeric) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.add_appraisal_area(uuid, text, text, numeric) FROM PUBLIC;
+
+-- ============================================================
+-- 5. update_appraisal_area — mandatory rows cannot be edited by anyone
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.update_appraisal_area(
+  p_area_id uuid,
+  p_name text,
+  p_description text DEFAULT NULL,
+  p_weight numeric DEFAULT 1
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_cycle appraisal_cycles;
+  v_mandatory boolean;
+BEGIN
+  SELECT is_mandatory INTO v_mandatory FROM appraisal_areas WHERE id = p_area_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Area not found'; END IF;
+
+  SELECT c.* INTO v_cycle FROM appraisal_cycles c JOIN appraisal_areas a ON a.appraisal_id = c.id WHERE a.id = p_area_id;
+
+  IF v_mandatory THEN
+    RAISE EXCEPTION 'Mandatory goals cannot be edited';
+  END IF;
+
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    IF NOT (
+      v_cycle.allow_edit_areas
+      AND v_cycle.status = 'SCORING'
+      AND (v_cycle.employee_id = public.current_employee_id() OR v_cycle.reporting_manager_id = public.current_employee_id())
+    ) THEN
+      RAISE EXCEPTION 'Not authorized to edit appraisal areas';
+    END IF;
+  END IF;
+
+  UPDATE appraisal_areas
+     SET name = p_name, description = p_description, weight = COALESCE(p_weight, 1)
+   WHERE id = p_area_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.update_appraisal_area(uuid, text, text, numeric) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.update_appraisal_area(uuid, text, text, numeric) FROM PUBLIC;
+
+-- ============================================================
+-- 6. delete_appraisal_area — mandatory rows cannot be removed by anyone
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.delete_appraisal_area(p_area_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_cycle appraisal_cycles;
+  v_mandatory boolean;
+BEGIN
+  SELECT is_mandatory INTO v_mandatory FROM appraisal_areas WHERE id = p_area_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Area not found'; END IF;
+
+  SELECT c.* INTO v_cycle FROM appraisal_cycles c JOIN appraisal_areas a ON a.appraisal_id = c.id WHERE a.id = p_area_id;
+
+  IF v_mandatory THEN
+    RAISE EXCEPTION 'Mandatory goals cannot be removed';
+  END IF;
+
+  IF NOT public.has_privilege('performance.appraisal') THEN
+    IF NOT (
+      v_cycle.allow_edit_areas
+      AND v_cycle.status = 'SCORING'
+      AND (v_cycle.employee_id = public.current_employee_id() OR v_cycle.reporting_manager_id = public.current_employee_id())
+    ) THEN
+      RAISE EXCEPTION 'Not authorized to remove appraisal areas';
+    END IF;
+  END IF;
+
+  DELETE FROM appraisal_areas WHERE id = p_area_id;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.delete_appraisal_area(uuid) TO authenticated;
+REVOKE EXECUTE ON FUNCTION public.delete_appraisal_area(uuid) FROM PUBLIC;
+
+-- ============================================================
+-- 7. appraisal_weighted_avg — only average areas actually scored by the party
+--    (unscored areas must not drag the average down)
+-- ============================================================
+CREATE OR REPLACE FUNCTION public.appraisal_weighted_avg(p_appraisal_id uuid, p_party text)
+RETURNS numeric
+LANGUAGE sql
+STABLE
+SET search_path = public
+AS $$
+  SELECT ROUND(
+    SUM(
+      CASE WHEN p_party = 'manager' THEN a.manager_score
+           ELSE a.employee_score END * COALESCE(a.weight, 1)
+    )
+    / NULLIF(SUM(COALESCE(a.weight, 1)), 0),
+    2)
+  FROM appraisal_areas a
+  WHERE a.appraisal_id = p_appraisal_id
+    AND (CASE WHEN p_party = 'manager' THEN a.manager_score ELSE a.employee_score END) IS NOT NULL;
+$$;
 
 -- ===========================================================================
 -- DEFAULT ADMIN EMPLOYEE (role SUPER_ADMIN => every privilege)

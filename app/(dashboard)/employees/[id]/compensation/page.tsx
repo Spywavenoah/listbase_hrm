@@ -36,6 +36,7 @@ export default function CompensationPage() {
     grade_level_id: '',
     compensation_grade: '',
     monthly_salary: '',
+    annual_salary: '',
     bank_name: '',
     bank_account_number: '',
     bank_routing_number: '',
@@ -47,7 +48,7 @@ export default function CompensationPage() {
   const load = useCallback(async () => {
     try {
       const [empRes, gradeRes, histRes] = await Promise.all([
-        supabase.from('employees').select('compensation_grade, monthly_salary, grade_level_id, bank_name, bank_account_number, bank_routing_number, employment_status').eq('id', id).maybeSingle(),
+        supabase.from('employees').select('compensation_grade, monthly_salary, annual_salary, grade_level_id, bank_name, bank_account_number, bank_routing_number, employment_status').eq('id', id).maybeSingle(),
         supabase.from('grade_levels').select('*').eq('is_active', true).order('sort_order', { ascending: true }),
         supabase.from('employee_history').select('*').eq('employee_id', id).order('created_at', { ascending: false }).limit(20),
       ]);
@@ -58,6 +59,7 @@ export default function CompensationPage() {
           grade_level_id: empRes.data.grade_level_id || '',
           compensation_grade: empRes.data.compensation_grade || '',
           monthly_salary: empRes.data.monthly_salary != null && empRes.data.monthly_salary > 0 ? String(empRes.data.monthly_salary) : '',
+          annual_salary: empRes.data.annual_salary != null && empRes.data.annual_salary > 0 ? String(empRes.data.annual_salary) : '',
           bank_name: empRes.data.bank_name || '',
           bank_account_number: empRes.data.bank_account_number || '',
           bank_routing_number: empRes.data.bank_routing_number || '',
@@ -78,12 +80,15 @@ export default function CompensationPage() {
     setSaving(true);
     try {
       const selectedGrade = grades.find((g) => g.id === form.grade_level_id);
+      const annual = form.annual_salary ? Number(form.annual_salary) : null;
+      const monthly = annual != null && annual > 0 ? annual / 12 : (form.monthly_salary ? Number(form.monthly_salary) : null);
       const { error } = await supabase
         .from('employees')
         .update({
           grade_level_id: form.grade_level_id || null,
           compensation_grade: selectedGrade?.name || form.compensation_grade || null,
-          monthly_salary: form.monthly_salary ? Number(form.monthly_salary) : null,
+          annual_salary: annual,
+          monthly_salary: monthly,
           bank_name: form.bank_name || null,
           bank_account_number: form.bank_account_number || null,
           bank_routing_number: form.bank_routing_number || null,
@@ -126,18 +131,31 @@ export default function CompensationPage() {
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <Label>Monthly Salary</Label>
-            <Input
-              type="number"
-              min="0"
-              step="0.01"
-              value={form.monthly_salary}
-              onChange={(e) => setForm({ ...form, monthly_salary: e.target.value })}
-              placeholder="e.g. 250000"
-            />
-            <p className="text-xs text-muted-foreground">Used by the payroll engine to generate payslips. Changes are versioned in the employment history automatically.</p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label>Annual Salary</Label>
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.annual_salary}
+                onChange={(e) => setForm({ ...form, annual_salary: e.target.value })}
+                placeholder="e.g. 3000000"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Monthly Salary</Label>
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.monthly_salary}
+                onChange={(e) => setForm({ ...form, monthly_salary: e.target.value })}
+                placeholder="e.g. 250000"
+              />
+            </div>
           </div>
+          <p className="text-xs text-muted-foreground">When annual salary is provided, payroll derives basic monthly pay as annual/12. Changes are versioned in the employment history automatically.</p>
 
           <div className="border-t border-border pt-4">
             <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-4">Bank Details</h4>

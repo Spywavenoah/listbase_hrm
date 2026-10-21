@@ -14,7 +14,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea';
 import { toast } from 'sonner';
 import { useAccess } from '@/lib/access';
-import { Coins, Wallet, Plus, FileText, Users, CalendarDays, CheckCircle2, CircleDollarSign } from 'lucide-react';
+import { Coins, Wallet, Plus, FileText, Users, CalendarDays, CheckCircle2, CircleDollarSign, Pencil, Printer, Download } from 'lucide-react';
+import { fetchLetterheads, getBrandVariables, buildLetterheadHtml, buildDocumentHtml, downloadHtmlAsPdf, printHtml } from '@/lib/letterhead';
 import {
   ALLOWANCE_ADVICE_BUCKET,
   ALLOWANCE_ADVICE_MAX_SIZE,
@@ -87,6 +88,16 @@ export default function AllowancePaymentsPage() {
   const [adviceFile, setAdviceFile] = useState<File | null>(null);
   const [recording, setRecording] = useState(false);
 
+  const [editOpen, setEditOpen] = useState(false);
+  const [editForm, setEditForm] = useState({ name: '', start_date: '', end_date: '' });
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [hasPayments, setHasPayments] = useState(false);
+
+  const [pdfOpen, setPdfOpen] = useState(false);
+  const [letterheads, setLetterheads] = useState<any[]>([]);
+  const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>('');
+  const [pdfLoading, setPdfLoading] = useState(false);
+
   const selectedCycle = useMemo(() => cycles.find((c) => c.id === selectedId) || null, [cycles, selectedId]);
 
   const loadAll = useCallback(async () => {
@@ -109,18 +120,20 @@ export default function AllowancePaymentsPage() {
   useEffect(() => { loadAll(); }, [loadAll]);
 
   const loadDetail = useCallback(async (cycleId: string) => {
-    if (!cycleId) { setCycleEmployees([]); setLedger([]); setPayments([]); return; }
+    if (!cycleId) { setCycleEmployees([]); setLedger([]); setPayments([]); setHasPayments(false); return; }
     try {
       const [ce, lg, pm] = await Promise.all([
-        supabase.from('offshore_allowance_cycle_employees').select('*, employees:id(*)').eq('cycle_id', cycleId),
+        supabase.from('offshore_allowance_cycle_employees').select('*, employees(first_name, last_name)').eq('cycle_id', cycleId),
         supabase.from('offshore_allowance_day_ledger').select('*').eq('cycle_id', cycleId),
         supabase.from('offshore_allowance_payments').select('*').eq('cycle_id', cycleId).order('created_at', { ascending: false }),
       ]);
       setCycleEmployees((ce.data || []) as unknown as AllowanceCycleEmployee[]);
       setLedger((lg.data || []) as unknown as AllowanceDayLedger[]);
       setPayments((pm.data || []) as unknown as AllowancePayment[]);
+      setHasPayments((pm.data?.length || 0) > 0 || (lg.data || []).some((l: any) => l.status === 'PAID'));
     } catch (err) {
       console.error(err);
+      setHasPayments(false);
     }
   }, []);
 
@@ -236,9 +249,138 @@ export default function AllowancePaymentsPage() {
     return rows;
   }, [workforceByEmployee, cycleForm.project_id, cycleForm.start_date, cycleForm.end_date, cycleTotalDays, resolvedRate, paidDays]);
 
-  // Re-select every previewed employee whenever the preview set changes.
+    // Re-select every previewed employee whenever the preview set changes.
   const previewKey = cyclePreview.map((r) => r.employee_id).join(',');
   useEffect(() => { setCycleSel(new Set(cyclePreview.map((r) => r.employee_id))); }, [previewKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const openEdit = () => {
+    if (!selectedCycle) return;
+    setEditForm({ name: selectedCycle.name, start_date: selectedCycle.start_date || '', end_date: selectedCycle.end_date || '' });
+    setEditOpen(true);
+  };
+
+  const saveEdit = async () => {
+    if (!selectedCycle) return;
+    if (!editForm.name.trim()) { toast.error('Cycle name is required'); return; }
+    if (!editForm.start_date || !editForm.end_date) { toast.error('Start and end dates are required'); return; }
+    if (editForm.end_date < editForm.start_date) { toast.error('End date cannot be before start date'); return; }
+    setSavingEdit(true);
+    try {
+      const { error } = await supabase.rpc('update_offshore_allowance_cycle', {
+        p_cycle_id: selectedCycle.id,
+        p_name: editForm.name.trim(),
+        p_start_date: editForm.start_date,
+        p_end_date: editForm.end_date,
+      });
+      if (error) throw error;
+      toast.success('Cycle updated');
+      setEditOpen(false);
+      await loadAll();
+      await loadDetail(selectedCycle.id);
+    } catch (err) {
+      toast.error('Failed: ' + (err as Error).message);
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const openPdf = async () => {
+    if (!selectedCycle) return;
+    setPdfOpen(true);
+    setPdfLoading(true);
+    try {
+      const list = await fetchLetterheads();
+      const active = list.filter((l: any) => l.is_active);
+      setLetterheads(active);
+      const def = active.find((l: any) => l.is_default) || active[0];
+      if (def) setSelectedLetterheadId(def.id);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setPdfLoading(false);
+    }
+  };
+
+  const buildCycleBodyHtml = () => {
+    const proj = selectedCycle?.project_id ? projectMap[selectedCycle.project_id] : null;
+    const meta = [
+      { label: 'Project', value: proj ? `${proj.code ? proj.code + ' · ' : ''}${proj.name}` : '—' },
+      { label: 'Period', value: `${selectedCycle?.start_date || ''} to ${selectedCycle?.end_date || ''}` },
+      { label: 'Currency', value: selectedCycle?.currency || 'USD' },
+      { label: 'Employees', value: String(cycleEmployees.length) },
+      { label: 'Days paid', value: String(totals.paidDays) },
+      { label: 'Days remaining', value: String(totals.remainingDays) },
+      { label: 'Total paid', value: fmtMoney(totals.totalPaid, selectedCycle?.currency) },
+    ];
+    const summaryTable = `<table class="noborder"><tbody>${meta.map((m) => `<tr><td style="width:160px;color:#475569;">${m.label}</td><td style="font-weight:600;">${m.value}</td></tr>`).join('')}</tbody></table>`;
+    const empRows = cycleEmployees
+      .map((ce) => {
+        const rows = ledgerByEmployee[ce.employee_id] || [];
+        const paid = rows.filter((r) => r.status === 'PAID').length;
+        const rate = Number(ce.day_rate || 0);
+        const paidAmt = paid * rate;
+        return `<tr><td>${employeeName(ce.employees)}</td><td style="text-align:right;">${fmtMoney(rate, selectedCycle?.currency)}</td><td style="text-align:right;">${rows.length}</td><td style="text-align:right;">${paid}</td><td style="text-align:right;">${Math.max(0, rows.length - paid)}</td><td style="text-align:right;">${fmtMoney(paidAmt, selectedCycle?.currency)}</td></tr>`;
+      })
+      .join('');
+    const trackTable = `<h3 style="margin:26px 0 10px;font-size:16px;">Payment tracking</h3><table><thead><tr><th>Employee</th><th style="text-align:right;">Rate/day</th><th style="text-align:right;">Worked</th><th style="text-align:right;">Paid</th><th style="text-align:right;">Remaining</th><th style="text-align:right;">Paid amount</th></tr></thead><tbody>${empRows}</tbody></table>`;
+    const payRows = payments
+      .map(
+        (p) =>
+          `<tr><td>${fmtDate(p.payment_date)}</td><td>${p.reference || '—'}</td><td style="text-align:right;">${p.days_count}</td><td style="text-align:right;">${p.employee_count}</td><td style="text-align:right;">${fmtMoney(p.total_amount, p.currency)}</td></tr>`,
+      )
+      .join('');
+    const histTable = payments.length
+      ? `<h3 style="margin:26px 0 10px;font-size:16px;">Payment history</h3><table><thead><tr><th>Date</th><th>Reference</th><th style="text-align:right;">Days</th><th style="text-align:right;">Employees</th><th style="text-align:right;">Total</th></tr></thead><tbody>${payRows}</tbody></table>`
+      : '<p style="color:#64748b;">No payments recorded yet.</p>';
+    return `${summaryTable}${trackTable}${histTable}`;
+  };
+
+  const doDownloadPdf = async () => {
+    if (!selectedCycle) return;
+    setPdfLoading(true);
+    try {
+      const vars = await getBrandVariables();
+      const lh = letterheads.find((l) => l.id === selectedLetterheadId);
+      const lhHtml = lh ? buildLetterheadHtml(lh.body_html, vars) : '';
+      const body = buildCycleBodyHtml();
+      const html = buildDocumentHtml({
+        letterheadHtml: lhHtml,
+        title: 'Offshore Allowance Cycle',
+        subtitle: selectedCycle.name,
+        meta: [{ label: 'Generated on', value: new Date().toLocaleDateString() }],
+        bodyHtml: body,
+      });
+      await downloadHtmlAsPdf({ html, filename: `offshore-allowance-cycle-${selectedCycle.name.replace(/[^a-z0-9]+/gi, '-')}.pdf` });
+      toast.success('PDF downloaded');
+    } catch (err) {
+      toast.error('Failed to download PDF: ' + (err as Error).message);
+    } finally {
+      setPdfLoading(false);
+    }
+  };
+
+  const doPrint = async () => {
+    if (!selectedCycle) return;
+    setPdfLoading(true);
+    try {
+      const vars = await getBrandVariables();
+      const lh = letterheads.find((l) => l.id === selectedLetterheadId);
+      const lhHtml = lh ? buildLetterheadHtml(lh.body_html, vars) : '';
+      const body = buildCycleBodyHtml();
+      const html = buildDocumentHtml({
+        letterheadHtml: lhHtml,
+        title: 'Offshore Allowance Cycle',
+        subtitle: selectedCycle.name,
+        meta: [{ label: 'Generated on', value: new Date().toLocaleDateString() }],
+        bodyHtml: body,
+      });
+      printHtml(html);
+    } catch (err) {
+      toast.error('Failed to print: ' + (err as Error).message);
+    } finally {
+      setPdfLoading(false);
+    }
+  };
 
   const toggleCycleEmployee = (id: string) => {
     setCycleSel((prev) => {
@@ -310,7 +452,6 @@ export default function AllowancePaymentsPage() {
   const togglePayDay = (day: number) => {
     setPayForm((f) => {
       if (f.day_nos.includes(day)) return { ...f, day_nos: f.day_nos.filter((d) => d !== day) };
-      if (f.day_nos.length >= MAX_DAYS_PER_PAYMENT) { toast.error(`You can pay a maximum of ${MAX_DAYS_PER_PAYMENT} days at a time`); return f; }
       if (!daySelectable(f.employee_ids, day)) { toast.error('That day is not available to pay for a selected employee'); return f; }
       return { ...f, day_nos: [...f.day_nos, day].sort((a, b) => a - b) };
     });
@@ -338,7 +479,6 @@ export default function AllowancePaymentsPage() {
     if (!selectedCycle) return;
     if (payForm.employee_ids.length === 0) { toast.error('Select at least one employee'); return; }
     if (payForm.day_nos.length === 0) { toast.error('Select at least one day to pay'); return; }
-    if (payForm.day_nos.length > MAX_DAYS_PER_PAYMENT) { toast.error(`You can pay a maximum of ${MAX_DAYS_PER_PAYMENT} days at a time`); return; }
     setRecording(true);
     try {
       let advicePath: string | null = null;
@@ -384,11 +524,11 @@ export default function AllowancePaymentsPage() {
     }
   };
 
-  const dayCount = selectedCycle ? selectedCycle.total_days : 0;
+  const dayCountTotal = ledger.length;
 
   const summaryCards = [
     { label: 'Employees', value: cycleEmployees.length, icon: Users, color: 'primary' as const },
-    { label: 'Days per cycle', value: dayCount, icon: CalendarDays, color: 'info' as const },
+    { label: 'Total days', value: dayCountTotal, icon: CalendarDays, color: 'info' as const },
     { label: 'Days paid', value: totals.paidDays, icon: CheckCircle2, color: 'success' as const },
     { label: 'Days remaining', value: totals.remainingDays, icon: Coins, color: 'warning' as const },
     { label: 'Total paid', value: fmtMoney(totals.totalPaid, selectedCycle?.currency), icon: CircleDollarSign, color: 'success' as const },
@@ -400,13 +540,19 @@ export default function AllowancePaymentsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Offshore Allowance Payments</h1>
           <p className="text-sm text-muted-foreground">
-            Finance pays up to {MAX_DAYS_PER_PAYMENT} days at a time out of a {dayCount}-day cycle for multiple employees, tracks what is paid and what is left, and uploads the payment advice.
+            Finance pays up to {MAX_DAYS_PER_PAYMENT} days at a time for multiple employees, tracks what is paid and what is left, and uploads the payment advice.
           </p>
         </div>
         {canManage && (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={openCycle}>
               <Plus className="mr-2 h-4 w-4" /> New Cycle
+            </Button>
+            <Button variant="outline" onClick={openEdit} disabled={!selectedCycle}>
+              <Pencil className="mr-2 h-4 w-4" /> Edit Cycle
+            </Button>
+            <Button variant="outline" onClick={openPdf} disabled={!selectedCycle}>
+              <Download className="mr-2 h-4 w-4" /> Download PDF
             </Button>
             <Button onClick={openPay} disabled={!selectedCycle}>
               <Wallet className="mr-2 h-4 w-4" /> Make Payment
@@ -702,6 +848,58 @@ export default function AllowancePaymentsPage() {
       </Dialog>
 
       {/* Record payment dialog */}
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Edit Cycle</DialogTitle></DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label>Cycle name *</Label>
+              <Input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>Start date *</Label>
+                <Input type="date" value={editForm.start_date} disabled={hasPayments} onChange={(e) => setEditForm({ ...editForm, start_date: e.target.value })} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>End date *</Label>
+                <Input type="date" value={editForm.end_date} disabled={hasPayments} min={editForm.start_date} onChange={(e) => setEditForm({ ...editForm, end_date: e.target.value })} />
+              </div>
+            </div>
+            {hasPayments && <p className="text-xs text-muted-foreground">Dates lock once payments are recorded — you can still rename.</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
+            <Button onClick={saveEdit} disabled={savingEdit}>{savingEdit ? 'Saving...' : 'Save'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={pdfOpen} onOpenChange={setPdfOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader><DialogTitle>Download / Print Cycle PDF</DialogTitle></DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label>Letterhead</Label>
+              <Select value={selectedLetterheadId || undefined} onValueChange={setSelectedLetterheadId}>
+                <SelectTrigger><SelectValue placeholder={pdfLoading ? 'Loading...' : 'Select letterhead'} /></SelectTrigger>
+                <SelectContent>
+                  {letterheads.map((l) => (
+                    <SelectItem key={l.id} value={l.id}>{l.name}{l.is_default ? ' (Default)' : ''}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="text-xs text-muted-foreground">The PDF includes summary, payment tracking table, and payment history using the selected letterhead.</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPdfOpen(false)}>Close</Button>
+            <Button variant="outline" onClick={doPrint} disabled={pdfLoading}><Printer className="mr-2 h-4 w-4" /> Print</Button>
+            <Button onClick={doDownloadPdf} disabled={pdfLoading}><Download className="mr-2 h-4 w-4" /> Download PDF</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={payOpen} onOpenChange={(o) => (o ? setPayOpen(true) : setPayOpen(false))}>
         <DialogContent className="max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>Make Payment</DialogTitle></DialogHeader>
@@ -738,9 +936,9 @@ export default function AllowancePaymentsPage() {
             </div>
 
             <div className="space-y-1.5">
-              <Label>Days to pay * (max {MAX_DAYS_PER_PAYMENT})</Label>
+              <Label>Days to pay *</Label>
               <div className="flex flex-wrap gap-1.5">
-                {Array.from({ length: dayCount }, (_, i) => i + 1).map((d) => {
+                {Array.from({ length: selectedCycle?.total_days || dayCountTotal }, (_, i) => i + 1).map((d) => {
                   const selectable = daySelectable(payForm.employee_ids, d);
                   const checked = payForm.day_nos.includes(d);
                   return (
@@ -764,7 +962,7 @@ export default function AllowancePaymentsPage() {
                 })}
               </div>
               <p className="text-xs text-muted-foreground">
-                {payForm.day_nos.length} of {MAX_DAYS_PER_PAYMENT} days selected.
+                {payForm.day_nos.length} day(s) selected.
               </p>
             </div>
 

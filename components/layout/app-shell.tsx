@@ -94,7 +94,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
 
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-        <SheetContent side="left" className="w-72 p-0 sm:max-w-xs bg-card shadow-2xl">
+        <SheetContent side="left" className="w-72 p-0 sm:max-w-xs bg-[hsl(187.62deg_100%_2.04%)] shadow-2xl">
           <SidebarContent onNavigate={() => setMobileOpen(false)} />
         </SheetContent>
       </Sheet>
