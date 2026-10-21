@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -14,7 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/badge';
 import { supabase } from '@/lib/supabase/client';
 import { toast } from 'sonner';
-import { Plus, Trash2, Users, Lock, Send, ClipboardList } from 'lucide-react';
+import { Plus, Trash2, Users, Lock, Send, ClipboardList, Upload, Eye, FileText, X } from 'lucide-react';
 import type { EmployeeEmergencyContact } from '@/lib/types';
 import { useAccess } from '@/lib/access';
 import { CustomFieldsBlock } from '@/components/field-engine/custom-fields';
@@ -96,6 +96,11 @@ export default function PersonalPage() {
     state_of_origin: '',
     lga: '',
     national_id: '',
+    passport_number: '',
+    passport_issue_date: '',
+    passport_expiry_date: '',
+    passport_file_path: '',
+    passport_file_name: '',
     residential_address: '',
     permanent_address: '',
     city: '',
@@ -127,6 +132,8 @@ export default function PersonalPage() {
   const [crReason, setCrReason] = useState('');
   const [submittingChange, setSubmittingChange] = useState(false);
   const [myRequests, setMyRequests] = useState<ChangeRequestRow[]>([]);
+  const passportInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingPassport, setUploadingPassport] = useState(false);
 
   const canWrite = can('employees.manage');
   const isSelf = myId === id;
@@ -157,6 +164,11 @@ export default function PersonalPage() {
           state_of_origin: d.state_of_origin || '',
           lga: d.lga || '',
           national_id: d.national_id || '',
+          passport_number: d.passport_number || '',
+          passport_issue_date: d.passport_issue_date || '',
+          passport_expiry_date: d.passport_expiry_date || '',
+          passport_file_path: d.passport_file_path || '',
+          passport_file_name: d.passport_file_name || '',
           residential_address: d.residential_address || d.address || '',
           permanent_address: d.permanent_address || '',
           city: d.city || '',
@@ -237,16 +249,56 @@ export default function PersonalPage() {
     }
   };
 
+  const uploadPassport = async (file: File) => {
+    if (file.size > 15 * 1024 * 1024) {
+      toast.error('File exceeds 15 MB limit');
+      return;
+    }
+    setUploadingPassport(true);
+    try {
+      const ext = file.name.split('.').pop() || 'bin';
+      const path = `passports/${id}/${Date.now()}.${ext}`;
+      const { error: upErr } = await supabase.storage
+        .from('employee-documents')
+        .upload(path, file, { upsert: true, contentType: file.type });
+      if (upErr) throw upErr;
+      const { error } = await supabase
+        .from('employees')
+        .update({ passport_file_path: path, passport_file_name: file.name })
+        .eq('id', id);
+      if (error) throw error;
+      setForm((f) => ({ ...f, passport_file_path: path, passport_file_name: file.name }));
+      toast.success('Passport uploaded');
+    } catch (err) {
+      toast.error('Failed to upload: ' + (err as Error).message);
+    } finally {
+      setUploadingPassport(false);
+    }
+  };
+
+  const viewPassport = async () => {
+    if (!form.passport_file_path) return;
+    try {
+      const { data, error } = await supabase.storage
+        .from('employee-documents')
+        .createSignedUrl(form.passport_file_path, 3600);
+      if (error) throw error;
+      window.open(data.signedUrl, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      toast.error('Failed to open: ' + (err as Error).message);
+    }
+  };
+
   const handleSave = async () => {
     setSaving(true);
     try {
       const { error } = await supabase
         .from('employees')
         .update({
-          first_name: form.first_name,
-          last_name: form.last_name,
-          email: form.email,
-          phone: form.phone,
+          first_name: form.first_name || null,
+          last_name: form.last_name || null,
+          email: form.email || null,
+          phone: form.phone || null,
           secondary_phone: form.secondary_phone || null,
           date_of_birth: form.date_of_birth || null,
           gender: form.gender || null,
@@ -255,6 +307,11 @@ export default function PersonalPage() {
           state_of_origin: form.state_of_origin || null,
           lga: form.lga || null,
           national_id: form.national_id || null,
+          passport_number: form.passport_number || null,
+          passport_issue_date: form.passport_issue_date || null,
+          passport_expiry_date: form.passport_expiry_date || null,
+          passport_file_path: form.passport_file_path || null,
+          passport_file_name: form.passport_file_name || null,
           residential_address: form.residential_address || null,
           permanent_address: form.permanent_address || null,
           city: form.city || null,
@@ -263,8 +320,8 @@ export default function PersonalPage() {
           postal_code: form.postal_code || null,
           blood_group: form.blood_group || null,
           genotype: form.genotype || null,
-          disability_status: form.disability_status || 'NONE',
-          disability_details: form.disability_status === 'DISABLED' ? (form.disability_details || null) : null,
+          disability_status: form.disability_status || null,
+          disability_details: form.disability_details || null,
         })
         .eq('id', id);
       if (error) throw error;
@@ -317,7 +374,71 @@ export default function PersonalPage() {
     <div className="space-y-6 animate-fade-in">
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg">Personal Information</CardTitle>
+          <CardTitle className="text-lg">Passport Details</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <fieldset disabled={locked} className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="space-y-1.5">
+                <Label>Passport Number</Label>
+                <Input value={form.passport_number} onChange={(e) => setForm({ ...form, passport_number: e.target.value })} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Issue Date</Label>
+                <Input type="date" value={form.passport_issue_date} onChange={(e) => setForm({ ...form, passport_issue_date: e.target.value })} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Expiry Date</Label>
+                <Input type="date" value={form.passport_expiry_date} onChange={(e) => setForm({ ...form, passport_expiry_date: e.target.value })} />
+              </div>
+            </div>
+          </fieldset>
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-lg border border-border p-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <FileText className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-sm font-medium">Passport Document</p>
+                <p className="text-xs text-muted-foreground">
+                  {form.passport_file_name || 'No passport file uploaded'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {form.passport_file_path && (
+                <Button variant="outline" size="sm" onClick={viewPassport}>
+                  <Eye className="mr-2 h-4 w-4" /> Preview
+                </Button>
+              )}
+              {(canWrite || isSelf) && !locked && (
+                <>
+                  <input
+                    ref={passportInputRef}
+                    type="file"
+                    accept="application/pdf,image/jpeg,image/png"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) uploadPassport(f);
+                      e.target.value = '';
+                    }}
+                  />
+                  <Button size="sm" onClick={() => passportInputRef.current?.click()} disabled={uploadingPassport}>
+                    <Upload className="mr-2 h-4 w-4" />
+                    {uploadingPassport ? 'Uploading...' : form.passport_file_path ? 'Replace' : 'Upload'}
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Identity & Personal Details</CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
           <fieldset disabled={locked} className="space-y-6">
