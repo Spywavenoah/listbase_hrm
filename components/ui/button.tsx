@@ -5,19 +5,24 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
+  'inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground hover:bg-primary/90',
+        default: 'bg-primary text-primary-foreground hover:bg-primary/90 hover:shadow-lg hover:shadow-primary/20',
         destructive:
-          'bg-destructive text-destructive-foreground hover:bg-destructive/90',
+          'bg-destructive text-destructive-foreground hover:bg-destructive/90 hover:shadow-lg hover:shadow-destructive/20',
         outline:
-          'border border-input bg-background hover:bg-accent hover:text-accent-foreground',
+          'border border-input bg-background hover:bg-accent hover:text-accent-foreground hover:shadow-sm',
         secondary:
-          'bg-secondary text-secondary-foreground hover:bg-secondary/80',
-        ghost: 'hover:bg-accent hover:text-accent-foreground',
+          'bg-secondary text-secondary-foreground hover:bg-secondary/80 hover:shadow-sm',
+        ghost: 'hover:bg-accent hover:text-accent-foreground hover:shadow-sm',
         link: 'text-primary underline-offset-4 hover:underline',
+        glow: 'bg-gradient-to-br from-primary via-primary/90 to-primary/80 text-primary-foreground shadow-lg shadow-primary/25 hover:shadow-primary/40 hover:-translate-y-0.5 hover:scale-[1.02]',
+        'glow-success': 'bg-gradient-to-br from-success via-success/90 to-success/80 text-success-foreground shadow-lg shadow-success/25 hover:shadow-success/40 hover:-translate-y-0.5 hover:scale-[1.02]',
+        'glow-warning': 'bg-gradient-to-br from-warning via-warning/90 to-warning/80 text-warning-foreground shadow-lg shadow-warning/25 hover:shadow-warning/40 hover:-translate-y-0.5 hover:scale-[1.02]',
+        'glow-destructive': 'bg-gradient-to-br from-destructive via-destructive/90 to-destructive/80 text-destructive-foreground shadow-lg shadow-destructive/25 hover:shadow-destructive/40 hover:-translate-y-0.5 hover:scale-[1.02]',
+        glass: 'bg-background/60 backdrop-blur-md border border-white/20 text-foreground hover:bg-background/80 hover:shadow-xl',
       },
       size: {
         default: 'h-10 px-4 py-2',

@@ -135,7 +135,7 @@ export function Topbar({
   };
 
   return (
-    <header className="flex h-16 items-center gap-3 border-b border-border/60 bg-card/60 backdrop-blur-md px-4 sm:px-6 print:hidden shadow-sm">
+    <header className="flex h-16 items-center gap-3 border-b border-border/60 bg-gradient-to-b from-card/80 to-card/50 backdrop-blur-xl px-4 sm:px-6 print:hidden shadow-lg shadow-primary/5">
       <Button variant="ghost" size="icon" className="lg:hidden btn-lift glow-green-hover" onClick={onToggleMobile} aria-label="Open menu">
         <Menu className="h-5 w-5" />
       </Button>
@@ -147,7 +147,7 @@ export function Topbar({
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           placeholder="Search employees, records, settings..."
-          className="pl-9 bg-accent/50 border border-border focus:ring-primary focus:border-primary"
+          className="pl-9 bg-background/80 backdrop-blur-md border border-border focus:ring-primary focus:border-primary shadow-sm hover:shadow-md"
           aria-label="Search"
         />
       </div>

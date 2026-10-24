@@ -261,20 +261,34 @@ export default function DashboardPage() {
               'Total Assets': String(stats.totalAssets),
               'Departments': '6',
             };
+
+            const glowVariant = {
+              primary: 'shadow-primary/10',
+              success: 'shadow-success/10',
+              warning: 'shadow-warning/10',
+              destructive: 'shadow-destructive/10',
+              info: 'shadow-primary/10',
+            }[card.color] || 'shadow-primary/10';
+
             return (
-              <Card key={card.label} className="card-hover reveal">
-                <CardContent className="p-5">
+              <Card
+                key={card.label}
+                className={`card-hover reveal border-0 bg-gradient-to-br from-background via-background/50 to-card shadow-lg hover:shadow-xl hover:-translate-y-1 ${glowVariant}`}
+              >
+                <CardContent className="p-5 pb-4">
                   <div className="flex items-center justify-between">
-                    <div className={cn('flex h-10 w-10 items-center justify-center rounded-xl shadow-sm', cls)}>
+                    <div className={cn('flex h-11 w-11 items-center justify-center rounded-2xl shadow-inner', cls)}>
                       <Icon className="h-5 w-5 float-icon" />
                     </div>
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/50 border border-white/60 backdrop-blur ml-2">
+                    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/40 border border-white/60 backdrop-blur-md ml-2 shadow-sm">
                       <TrendingUp className="h-4 w-4 text-success" />
                     </div>
                   </div>
-                  <p className="mt-3 text-2xl font-bold">{valueMap[card.label] || card.value}</p>
-                  <p className="text-xs sm:text-sm text-muted-foreground">{card.label}</p>
+                  <p className="mt-3 text-3xl font-bold tracking-tight">{valueMap[card.label] || card.value}</p>
+                  <p className="text-xs sm:text-sm text-muted-foreground mt-1">{card.label}</p>
+                  <p className={cn('mt-1 text-xs font-medium', card.trendColor)}>{card.trend}</p>
                 </CardContent>
+                <div className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-transparent via-current to-transparent opacity-20" />
               </Card>
             );
           })}

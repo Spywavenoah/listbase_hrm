@@ -158,14 +158,14 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
               <button
                 onClick={() => toggleSection(section.label)}
                 className={cn(
-                  'flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium transition-all duration-200',
+                  'flex w-full items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium transition-all duration-200 group',
                   hasActiveChild
-                    ? 'bg-red-800 text-white shadow-md'
-                    : 'text-white/60 hover:bg-white/10 hover:text-white'
+                    ? 'bg-primary/20 text-primary border border-primary/30 shadow-lg shadow-primary/10'
+                    : 'text-white/50 hover:bg-white/5 hover:text-white'
                 )}
               >
-                <section.icon className="h-4 w-4 shrink-0 float-icon" />
-                <span className="flex-1 text-left">{section.label}</span>
+                <section.icon className="h-4 w-4 shrink-0 float-icon group-hover:scale-110 transition-transform" />
+                <span className="flex-1 text-left group-hover:text-primary transition-colors">{section.label}</span>
                 <ChevronDown
                   className={cn(
                     'h-4 w-4 shrink-0 transition-transform duration-200',
@@ -187,18 +187,24 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
                         href={item.href}
                         onClick={onNavigate}
                         className={cn(
-                          'flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-all duration-200',
+                          'flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-all duration-200 group',
                           isActive
-                            ? 'bg-red-800 text-white font-medium shadow-sm'
-                            : 'text-white/50 hover:bg-white/10 hover:text-white'
+                            ? 'bg-primary/20 text-primary border border-primary/30 shadow-md shadow-primary/10'
+                            : 'text-white/40 hover:bg-white/5 hover:text-white hover:-translate-x-0.5'
                         )}
                       >
-                        <item.icon className="h-3.5 w-3.5 shrink-0" />
+                        <item.icon className="h-3.5 w-3.5 shrink-0 group-hover:scale-110 transition-transform" />
                         {item.label}
                         {item.badge && (
-                          <span className="ml-auto h-6 min-w-6 rounded-full bg-destructive text-destructive-foreground text-[10px] font-bold flex items-center justify-center px-1.5">
+                          <span className="ml-auto h-6 min-w-6 rounded-full bg-destructive text-destructive-foreground text-[10px] font-bold flex items-center justify-center px-1.5 shadow-lg shadow-destructive/30">
                             {item.badge}
                           </span>
+                        )}
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
                         )}
                       </Link>
                     );
