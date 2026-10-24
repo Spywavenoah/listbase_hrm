@@ -145,15 +145,16 @@ export default function AppraisalDetailPage() {
             <CardTitle className="text-base">Appraisal Areas</CardTitle>
             <CardDescription>
               {canEditAreas
-                ? 'Score each area from 1–5 with a justification.'
+                ? 'Score each area from 1–5 with a justification. You can add or edit areas while this setting is enabled.'
                 : 'Areas the employee is being appraised on.'}
             </CardDescription>
           </div>
-          {canManage && (
+          {(canManage || canEditAreas) && (
             <ManageAreasToolbar
               appraisalId={id}
               areas={areas}
               allowEdit={appraisal.allow_edit_areas}
+              canManage={canManage}
               disabled={status === 'COMPLETED' || status === 'CANCELLED' || status === 'PENDING_MD'}
               onChanged={load}
             />
@@ -248,9 +249,9 @@ function SummaryTile({ label, value, submitted, accent }: { label: string; value
 }
 
 function ManageAreasToolbar({
-  appraisalId, areas, allowEdit, disabled, onChanged,
+  appraisalId, areas, allowEdit, canManage, disabled, onChanged,
 }: {
-  appraisalId: string; areas: AppraisalArea[]; allowEdit: boolean; disabled: boolean; onChanged: () => void;
+  appraisalId: string; areas: AppraisalArea[]; allowEdit: boolean; canManage: boolean; disabled: boolean; onChanged: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: '', description: '', weight: '1' });
@@ -270,19 +271,21 @@ function ManageAreasToolbar({
   };
 
   return (
-    <div className="flex items-center gap-3">
-      <div className="hidden items-center gap-2 sm:flex">
-        <Label htmlFor="allowAreaEdit" className="text-xs text-muted-foreground">Allow emp/manager edits</Label>
-        <Switch
-          id="allowAreaEdit"
-          checked={allowEdit}
-          disabled={disabled}
-          onCheckedChange={async (v) => {
-            try { await setAppraisalEditAreas(appraisalId, v); toast.success('Updated'); onChanged(); }
-            catch (e) { toast.error((e as Error).message); }
-          }}
-        />
-      </div>
+      <div className="flex items-center gap-3">
+      {canManage && (
+        <div className="hidden items-center gap-2 sm:flex">
+          <Label htmlFor="allowAreaEdit" className="text-xs text-muted-foreground">Allow emp/manager edits</Label>
+          <Switch
+            id="allowAreaEdit"
+            checked={allowEdit}
+            disabled={disabled}
+            onCheckedChange={async (v) => {
+              try { await setAppraisalEditAreas(appraisalId, v); toast.success('Updated'); onChanged(); }
+              catch (e) { toast.error((e as Error).message); }
+            }}
+          />
+        </div>
+      )}
       <Button size="sm" disabled={disabled} onClick={() => setOpen(true)}>
         <Plus className="mr-2 h-4 w-4" /> Add Area
       </Button>

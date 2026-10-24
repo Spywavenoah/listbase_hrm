@@ -141,6 +141,8 @@ export const navSections: NavSection[] = [
     icon: Clock,
     items: [
       { label: 'Clock In/Out', href: '/attendance', icon: Clock },
+      { label: 'Time Card', href: '/attendance/timecard', icon: CalendarClock },
+      { label: 'Timecard Requests', href: '/attendance/timecard-requests', icon: ClipboardList, privilege: 'attendance.manage' },
       { label: 'Shifts', href: '/attendance/shifts', icon: CalendarClock, privilege: 'attendance.manage' },
       { label: 'Timesheets', href: '/attendance/timesheets', icon: ClipboardList, privilege: 'attendance.manage' },
     ],
@@ -169,6 +171,7 @@ export const navSections: NavSection[] = [
     items: [
       { label: 'Payroll Runs', href: '/payroll', icon: Wallet, privilege: 'payroll.manage' },
       { label: 'Pay Components', href: '/payroll/components', icon: Layers, privilege: 'payroll.settings' },
+      { label: 'Recorder Keeper', href: '/payroll/recorder', icon: ClipboardList, privileges: ['payroll.manage', 'payroll.settings'] },
       { label: 'Payslips', href: '/payroll/payslips', icon: FileText, privileges: ['payroll.manage', 'payroll.settings'] },
     ],
   },
@@ -266,6 +269,7 @@ export const navSections: NavSection[] = [
       { label: 'Privileges & Access', href: '/settings/access', icon: Shield, privilege: 'admin.privileges' },
       { label: 'Branding', href: '/settings/branding', icon: Palette, privilege: 'admin.settings' },
       { label: 'Company Profile', href: '/settings/company', icon: Building2, privilege: 'admin.settings' },
+      { label: 'Payroll Settings', href: '/settings/payroll', icon: Wallet, privilege: 'admin.settings' },
       { label: 'Payments', href: '/settings/payments', icon: CreditCard, privilege: 'admin.settings' },
       { label: 'Email (SMTP)', href: '/settings/smtp', icon: Mail, privilege: 'admin.settings' },
       { label: 'WhatsApp Attendance', href: '/settings/whatsapp', icon: MessageSquare, privilege: 'admin.settings' },

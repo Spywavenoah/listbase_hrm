@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import { supabase } from '@/lib/supabase/client';
 import { toast } from 'sonner';
 import type { GradeLevel, EmployeeHistoryEntry } from '@/lib/types';
@@ -32,14 +33,21 @@ export default function CompensationPage() {
   const [status, setStatus] = useState<string | null>(null);
   const [grades, setGrades] = useState<GradeLevel[]>([]);
   const [history, setHistory] = useState<EmployeeHistoryEntry[]>([]);
+  const [pensionAdmins, setPensionAdmins] = useState<string[]>([]);
   const [form, setForm] = useState({
     grade_level_id: '',
     compensation_grade: '',
-    monthly_salary: '',
     annual_salary: '',
     bank_name: '',
     bank_account_number: '',
     bank_routing_number: '',
+    pension_enabled: false,
+    nsitf_enabled: false,
+    tax_enabled: true,
+    pension_administrator: '',
+    pension_pin: '',
+    nsitf_number: '',
+    tax_id: '',
   });
 
   const canWrite = can('employees.manage');
@@ -47,10 +55,11 @@ export default function CompensationPage() {
 
   const load = useCallback(async () => {
     try {
-      const [empRes, gradeRes, histRes] = await Promise.all([
-        supabase.from('employees').select('compensation_grade, monthly_salary, annual_salary, grade_level_id, bank_name, bank_account_number, bank_routing_number, employment_status').eq('id', id).maybeSingle(),
+      const [empRes, gradeRes, histRes, settRes] = await Promise.all([
+        supabase.from('employees').select('compensation_grade, monthly_salary, annual_salary, grade_level_id, bank_name, bank_account_number, bank_routing_number, employment_status, pension_enabled, nsitf_enabled, tax_enabled, pension_administrator, pension_pin, nsitf_number, tax_id').eq('id', id).maybeSingle(),
         supabase.from('grade_levels').select('*').eq('is_active', true).order('sort_order', { ascending: true }),
         supabase.from('employee_history').select('*').eq('employee_id', id).order('created_at', { ascending: false }).limit(20),
+        supabase.from('system_settings').select('value').eq('group_name', 'payroll').eq('key', 'pension_administrators').maybeSingle(),
       ]);
       if (empRes.error) throw empRes.error;
       if (empRes.data) {
@@ -58,12 +67,31 @@ export default function CompensationPage() {
         setForm({
           grade_level_id: empRes.data.grade_level_id || '',
           compensation_grade: empRes.data.compensation_grade || '',
-          monthly_salary: empRes.data.monthly_salary != null && empRes.data.monthly_salary > 0 ? String(empRes.data.monthly_salary) : '',
           annual_salary: empRes.data.annual_salary != null && empRes.data.annual_salary > 0 ? String(empRes.data.annual_salary) : '',
           bank_name: empRes.data.bank_name || '',
           bank_account_number: empRes.data.bank_account_number || '',
           bank_routing_number: empRes.data.bank_routing_number || '',
+          pension_enabled: !!empRes.data.pension_enabled,
+          nsitf_enabled: !!empRes.data.nsitf_enabled,
+          tax_enabled: empRes.data.tax_enabled !== false,
+          pension_administrator: empRes.data.pension_administrator || '',
+          pension_pin: empRes.data.pension_pin || '',
+          nsitf_number: empRes.data.nsitf_number || '',
+          tax_id: empRes.data.tax_id || '',
         });
+      }
+      const adminsRaw = settRes.data?.value as unknown;
+      if (Array.isArray(adminsRaw)) {
+        const list: string[] = [];
+        for (const a of adminsRaw) {
+          if (typeof a === 'string') list.push(a);
+          else if (a && typeof a === 'object') {
+            const obj = a as Record<string, unknown>;
+            if (typeof obj.name === 'string') list.push(obj.name);
+            else if (typeof obj.title === 'string') list.push(obj.title);
+          }
+        }
+        setPensionAdmins(list);
       }
       setGrades((gradeRes.data || []) as unknown as GradeLevel[]);
       setHistory((histRes.data || []) as unknown as EmployeeHistoryEntry[]);
@@ -77,22 +105,41 @@ export default function CompensationPage() {
   useEffect(() => { load(); }, [load]);
 
   const handleSave = async () => {
+    if (form.pension_enabled && (!form.pension_administrator || !form.pension_pin.trim())) {
+      toast.error('Pension administrator and pension PIN are required when Pension is enabled');
+      return;
+    }
+    if (form.nsitf_enabled && !form.nsitf_number.trim()) {
+      toast.error('NSITF number is required when NSITF is enabled');
+      return;
+    }
+    if (form.tax_enabled && !form.tax_id.trim()) {
+      toast.error('Tax ID is required when Tax is enabled');
+      return;
+    }
     setSaving(true);
     try {
       const selectedGrade = grades.find((g) => g.id === form.grade_level_id);
       const annual = form.annual_salary ? Number(form.annual_salary) : null;
-      const monthly = annual != null && annual > 0 ? annual / 12 : (form.monthly_salary ? Number(form.monthly_salary) : null);
+      const patch: Record<string, unknown> = {
+        grade_level_id: form.grade_level_id || null,
+        compensation_grade: selectedGrade?.name || form.compensation_grade || null,
+        annual_salary: annual,
+        bank_name: form.bank_name || null,
+        bank_account_number: form.bank_account_number || null,
+        bank_routing_number: form.bank_routing_number || null,
+        pension_enabled: form.pension_enabled,
+        nsitf_enabled: form.nsitf_enabled,
+        tax_enabled: form.tax_enabled,
+        pension_administrator: form.pension_enabled ? form.pension_administrator : null,
+        pension_pin: form.pension_enabled ? form.pension_pin.trim() : null,
+        nsitf_number: form.nsitf_enabled ? form.nsitf_number.trim() : null,
+        tax_id: form.tax_enabled ? form.tax_id.trim() : null,
+      };
+      if (annual != null && annual > 0) patch.monthly_salary = annual / 12;
       const { error } = await supabase
         .from('employees')
-        .update({
-          grade_level_id: form.grade_level_id || null,
-          compensation_grade: selectedGrade?.name || form.compensation_grade || null,
-          annual_salary: annual,
-          monthly_salary: monthly,
-          bank_name: form.bank_name || null,
-          bank_account_number: form.bank_account_number || null,
-          bank_routing_number: form.bank_routing_number || null,
-        })
+        .update(patch)
         .eq('id', id);
       if (error) throw error;
       toast.success('Compensation information saved');
@@ -143,19 +190,102 @@ export default function CompensationPage() {
                 placeholder="e.g. 3000000"
               />
             </div>
-            <div className="space-y-1.5">
-              <Label>Monthly Salary</Label>
-              <Input
-                type="number"
-                min="0"
-                step="0.01"
-                value={form.monthly_salary}
-                onChange={(e) => setForm({ ...form, monthly_salary: e.target.value })}
-                placeholder="e.g. 250000"
-              />
-            </div>
           </div>
-          <p className="text-xs text-muted-foreground">When annual salary is provided, payroll derives basic monthly pay as annual/12. Changes are versioned in the employment history automatically.</p>
+          <p className="text-xs text-muted-foreground">Payroll derives basic monthly pay as annual/12. Changes are versioned in the employment history automatically.</p>
+
+          <div className="border-t border-border pt-4">
+            <h4 className="mb-4 text-sm font-semibold uppercase tracking-wide text-muted-foreground">Statutory Deductions</h4>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                <div>
+                  <p className="text-sm font-medium">Employee Pension</p>
+                  <p className="text-xs text-muted-foreground">8% employee / 10% employer contribution.</p>
+                </div>
+                <Switch
+                  checked={form.pension_enabled}
+                  onCheckedChange={(c) => setForm({ ...form, pension_enabled: c })}
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                <div>
+                  <p className="text-sm font-medium">Employee NSITF</p>
+                  <p className="text-xs text-muted-foreground">1% employer contribution to NSITF.</p>
+                </div>
+                <Switch
+                  checked={form.nsitf_enabled}
+                  onCheckedChange={(c) => setForm({ ...form, nsitf_enabled: c })}
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                <div>
+                  <p className="text-sm font-medium">Employee Tax</p>
+                  <p className="text-xs text-muted-foreground">Apply Nigerian PAYE tax bands.</p>
+                </div>
+                <Switch
+                  checked={form.tax_enabled}
+                  onCheckedChange={(c) => setForm({ ...form, tax_enabled: c })}
+                />
+              </div>
+            </div>
+
+            {form.pension_enabled && (
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label>Pension Administrator *</Label>
+                  <Select
+                    value={form.pension_administrator}
+                    onValueChange={(v) => setForm({ ...form, pension_administrator: v })}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Select administrator" /></SelectTrigger>
+                    <SelectContent>
+                      {pensionAdmins.length === 0 ? (
+                        <SelectItem value="__none" disabled>No administrators configured</SelectItem>
+                      ) : (
+                        pensionAdmins.map((a) => <SelectItem key={a} value={a}>{a}</SelectItem>)
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {pensionAdmins.length === 0 && (
+                    <p className="text-xs text-muted-foreground">Add pension administrators in Payroll Settings.</p>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Pension PIN *</Label>
+                  <Input
+                    value={form.pension_pin}
+                    onChange={(e) => setForm({ ...form, pension_pin: e.target.value })}
+                    placeholder="e.g. PEN100123456"
+                  />
+                </div>
+              </div>
+            )}
+
+            {form.nsitf_enabled && (
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label>NSITF Number *</Label>
+                  <Input
+                    value={form.nsitf_number}
+                    onChange={(e) => setForm({ ...form, nsitf_number: e.target.value })}
+                    placeholder="e.g. NSITF-000123"
+                  />
+                </div>
+              </div>
+            )}
+
+            {form.tax_enabled && (
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label>Tax ID *</Label>
+                  <Input
+                    value={form.tax_id}
+                    onChange={(e) => setForm({ ...form, tax_id: e.target.value })}
+                    placeholder="e.g. TIN 12345678-0001"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
 
           <div className="border-t border-border pt-4">
             <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-4">Bank Details</h4>

@@ -260,9 +260,6 @@ BEGIN
   END IF;
 
   v_days_count := array_length(p_day_nos, 1);
-  IF v_days_count > 4 THEN
-    RAISE EXCEPTION 'You can pay a maximum of 4 days at a time';
-  END IF;
 
   v_emp_count := array_length(p_employee_ids, 1);
   v_currency := v_cycle.currency;

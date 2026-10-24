@@ -20,8 +20,11 @@ interface PayComponent {
   component_type: string;
   calculation_type: string;
   formula: string | null;
+  amount: number | null;
   is_taxable: boolean;
   is_active: boolean;
+  is_system: boolean;
+  system_key: string | null;
   employee_id: string | null;
 }
 
@@ -40,6 +43,7 @@ const EMPTY_FORM = {
   component_type: 'EARNING',
   calculation_type: 'FIXED',
   formula: '',
+  amount: '',
   is_taxable: false,
   employee_id: null as string | null,
 };
@@ -92,6 +96,7 @@ export default function PayComponentsPage() {
       component_type: c.component_type,
       calculation_type: c.calculation_type,
       formula: c.formula || '',
+      amount: c.amount != null ? String(c.amount) : '',
       is_taxable: c.is_taxable,
       employee_id: c.employee_id,
     });
@@ -106,15 +111,22 @@ export default function PayComponentsPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const payload = {
+      const payload: Record<string, unknown> = {
         name: form.name,
         code: form.code.toUpperCase(),
         component_type: form.component_type,
         calculation_type: form.calculation_type,
         formula: form.formula || null,
+        amount: form.amount ? Number(form.amount) : null,
         is_taxable: form.is_taxable,
         employee_id: form.employee_id,
       };
+      if (editing?.is_system) {
+        delete payload.name;
+        delete payload.code;
+        delete payload.component_type;
+        delete payload.employee_id;
+      }
       if (editing) {
         const { error } = await supabase.from('pay_components').update(payload).eq('id', editing.id);
         if (error) throw error;
@@ -149,13 +161,25 @@ export default function PayComponentsPage() {
   ];
 
   const columns: Column<PayComponent>[] = [
-    { key: 'name', label: 'Name' },
+    {
+      key: 'name', label: 'Name',
+      render: (c) => (
+        <div className="flex items-center gap-2">
+          <span>{c.name}</span>
+          {c.is_system && <Badge variant="outline" className="bg-primary/10 text-primary">System</Badge>}
+        </div>
+      ),
+    },
     { key: 'code', label: 'Code' },
     {
       key: 'component_type', label: 'Type',
       render: (c) => <Badge variant="outline" className={typeColors[c.component_type] || ''}>{c.component_type}</Badge>,
     },
     { key: 'calculation_type', label: 'Calculation' },
+    {
+      key: 'amount', label: 'Amount / Rate',
+      render: (c) => c.amount != null ? (c.calculation_type === 'PERCENTAGE' ? `${c.amount}%` : `₦${Number(c.amount).toLocaleString()}`) : '—',
+    },
     { key: 'employee_id', label: 'Applies To', render: (c) => employeeName(c.employee_id) },
     { key: 'formula', label: 'Formula', render: (c) => c.formula || '—' },
     {
@@ -190,20 +214,25 @@ export default function PayComponentsPage() {
         <DialogContent>
           <DialogHeader><DialogTitle>{editing ? `Update Pay Component — ${editing.code}` : 'Add Pay Component'}</DialogTitle></DialogHeader>
           <div className="space-y-4 py-4">
+            {editing?.is_system && (
+              <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-xs text-muted-foreground">
+                System component. Name, code, type and scope are locked, but the rate/formula can be edited to match your company policy.
+              </div>
+            )}
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label>Name *</Label>
-                <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Basic Salary" />
+                <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Basic Salary" disabled={!!editing?.is_system} />
               </div>
               <div className="space-y-1.5">
                 <Label>Code *</Label>
-                <Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="BASIC" />
+                <Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="BASIC" disabled={!!editing?.is_system} />
               </div>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label>Component Type</Label>
-                <Select value={form.component_type} onValueChange={(v) => setForm({ ...form, component_type: v })}>
+                <Select value={form.component_type} onValueChange={(v) => setForm({ ...form, component_type: v })} disabled={!!editing?.is_system}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="EARNING">Earning</SelectItem>
@@ -225,15 +254,29 @@ export default function PayComponentsPage() {
                 </Select>
               </div>
             </div>
-            <div className="space-y-1.5">
-              <Label>Formula</Label>
-              <Input value={form.formula} onChange={(e) => setForm({ ...form, formula: e.target.value })} placeholder="basic * 0.1" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>{form.calculation_type === 'PERCENTAGE' ? 'Rate (%)' : 'Amount (₦)'}</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={form.amount}
+                  onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                  placeholder={form.calculation_type === 'PERCENTAGE' ? 'e.g. 8' : 'e.g. 50000'}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Formula</Label>
+                <Input value={form.formula} onChange={(e) => setForm({ ...form, formula: e.target.value })} placeholder="basic * 0.1" />
+              </div>
             </div>
             <div className="space-y-1.5">
               <Label>Employee</Label>
               <Select
                 value={form.employee_id || ALL_EMPLOYEES}
                 onValueChange={(v) => setForm({ ...form, employee_id: v === ALL_EMPLOYEES ? null : v })}
+                disabled={!!editing?.is_system}
               >
                 <SelectTrigger><SelectValue placeholder="All employees" /></SelectTrigger>
                 <SelectContent>
@@ -279,6 +322,10 @@ export default function PayComponentsPage() {
                 <dd>{viewTarget.calculation_type}</dd>
               </div>
               <div className="flex items-center justify-between gap-4">
+                <dt className="text-muted-foreground">Amount / Rate</dt>
+                <dd>{viewTarget.amount != null ? (viewTarget.calculation_type === 'PERCENTAGE' ? `${viewTarget.amount}%` : `₦${Number(viewTarget.amount).toLocaleString()}`) : '—'}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-4">
                 <dt className="text-muted-foreground">Formula</dt>
                 <dd>{viewTarget.formula || '—'}</dd>
               </div>
@@ -294,6 +341,12 @@ export default function PayComponentsPage() {
                 <dt className="text-muted-foreground">Status</dt>
                 <dd><Badge variant="outline" className={viewTarget.is_active ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground'}>{viewTarget.is_active ? 'Active' : 'Inactive'}</Badge></dd>
               </div>
+              {viewTarget.is_system && (
+                <div className="flex items-center justify-between gap-4">
+                  <dt className="text-muted-foreground">System Key</dt>
+                  <dd className="font-mono text-xs">{viewTarget.system_key || '—'}</dd>
+                </div>
+              )}
             </dl>
           )}
           <DialogFooter>
