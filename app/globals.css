@@ -104,6 +104,44 @@
   th.text-muted-foreground {
     color: #fff;
   }
+
+  /* Active menu / tab state — dark red background */
+  [aria-current="page"],
+  [aria-current="true"],
+  [data-state="active"],
+  .active,
+  .router-link-active,
+  .router-link-exact-active {
+    background-color: hsl(var(--destructive)) !important;
+    color: hsl(var(--destructive-foreground)) !important;
+  }
+
+  /* Active sidebar link text + icon */
+  [aria-current="page"] *,
+  [aria-current="true"] *,
+  [data-state="active"] *,
+  .active * {
+    color: hsl(var(--destructive-foreground)) !important;
+  }
+
+  /* Table header hover — dark red background with white text */
+  thead th:hover {
+    background-color: hsl(var(--destructive));
+    color: hsl(var(--destructive-foreground));
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  /* Table header cells with muted-foreground on hover */
+  thead.text-muted-foreground th:hover,
+  th.text-muted-foreground:hover {
+    background-color: hsl(var(--destructive));
+    color: #fff;
+  }
+
+  .dark thead th:hover {
+    background-color: hsl(var(--destructive));
+    color: hsl(var(--destructive-foreground));
+  }
   .dark thead {
     background-color: hsl(var(--primary));
     color: hsl(var(--primary-foreground));
