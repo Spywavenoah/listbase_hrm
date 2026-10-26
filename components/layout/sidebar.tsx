@@ -205,12 +205,6 @@ export function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
                   })}
                 </div>
               )}
-                        )}
-                      </Link>
-                    );
-                  })}
-                </div>
-              )}
             </div>
           );
         })}
