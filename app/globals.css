@@ -95,6 +95,12 @@
   thead th {
     color: hsl(var(--primary-foreground));
   }
+  thead.text-muted-foreground {
+    color: #fff;
+  }
+  thead.text-muted-foreground th {
+    color: #fff;
+  }
   .dark thead {
     background-color: hsl(var(--primary));
     color: hsl(var(--primary-foreground));
