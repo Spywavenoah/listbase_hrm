@@ -86,6 +86,22 @@
   html {
     scroll-behavior: smooth;
   }
+
+  /* Table header styling — dark green background with white text */
+  thead {
+    background-color: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+  }
+  thead th {
+    color: hsl(var(--primary-foreground));
+  }
+  .dark thead {
+    background-color: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+  }
+  .dark thead th {
+    color: hsl(var(--primary-foreground));
+  }
 }
 
 /* ===== Modern Animations & Effects ===== */
