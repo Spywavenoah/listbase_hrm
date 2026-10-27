@@ -30,6 +30,7 @@ export default function EmploymentPage() {
   const [managers, setManagers] = useState<{ id: string; first_name: string; last_name: string }[]>([]);
   const [grades, setGrades] = useState<GradeLevel[]>([]);
   const [shifts, setShifts] = useState<{ id: string; name: string; start_time: string; end_time: string }[]>([]);
+  const [facilities, setFacilities] = useState<{ id: string; name: string }[]>([]);
   const [form, setForm] = useState({
     employment_type: 'FULL_TIME',
     employment_status: 'PENDING_VERIFICATION',
@@ -45,6 +46,7 @@ export default function EmploymentPage() {
     reporting_manager_id: '',
     compensation_grade: '',
     shift_id: '',
+    location_id: '',
   });
   const [empCustom, setEmpCustom] = useState<Record<string, unknown>>({});
   const setEmpCustomValue = (fieldKey: string, value: unknown) =>
@@ -55,18 +57,20 @@ export default function EmploymentPage() {
 
   const load = useCallback(async () => {
     try {
-      const [empRes, deptRes, posRes, mgrRes, gradeRes, shiftRes, customRes] = await Promise.all([
+      const [empRes, deptRes, posRes, mgrRes, gradeRes, shiftRes, customRes, facRes] = await Promise.all([
         supabase.from('employees').select('*').eq('id', id).maybeSingle(),
         supabase.from('departments').select('id, name').eq('is_active', true),
         supabase.from('positions').select('id, title'),
         supabase.from('employees').select('id, first_name, last_name').neq('id', id),
         supabase.from('grade_levels').select('*').eq('is_active', true).order('sort_order', { ascending: true }),
         supabase.from('shifts').select('id, name, start_time, end_time').eq('is_active', true).order('name'),
+        supabase.from('attendance_facilities').select('id, name').eq('is_active', true).order('name'),
         fetchFieldValues('employee', id).catch(() => ({} as Record<string, unknown>)),
       ]);
 
       setEmpCustom(customRes);
       setShifts((shiftRes.data || []) as unknown as { id: string; name: string; start_time: string; end_time: string }[]);
+      setFacilities((facRes.data || []) as unknown as { id: string; name: string }[]);
 
       if (empRes.data) {
         setForm({
@@ -84,6 +88,7 @@ export default function EmploymentPage() {
           reporting_manager_id: empRes.data.reporting_manager_id || '',
           compensation_grade: empRes.data.compensation_grade || '',
           shift_id: empRes.data.shift_id || '',
+          location_id: empRes.data.location_id || '',
         });
       }
       setDepartments(deptRes.data || []);
@@ -118,6 +123,7 @@ export default function EmploymentPage() {
           department_id: form.department_id || null,
           reporting_manager_id: form.reporting_manager_id || null,
           shift_id: form.shift_id || null,
+          location_id: form.location_id || null,
           compensation_grade: form.grade_level_id
             ? grades.find((g) => g.id === form.grade_level_id)?.name || form.compensation_grade
             : null,
@@ -287,6 +293,20 @@ export default function EmploymentPage() {
                 <SelectItem key={s.id} value={s.id}>
                   {s.name} ({s.start_time.slice(0, 5)} - {s.end_time.slice(0, 5)})
                 </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label>Location / Facility</Label>
+          <p className="text-xs text-muted-foreground">Determines the geofence used for clock-in/out when not assigned to an active project.</p>
+          <Select value={form.location_id} onValueChange={(v) => setForm({ ...form, location_id: v })}>
+            <SelectTrigger><SelectValue placeholder="Select facility" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem key="" value="">None (use project geofence only)</SelectItem>
+              {facilities.map((f) => (
+                <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>
               ))}
             </SelectContent>
           </Select>
