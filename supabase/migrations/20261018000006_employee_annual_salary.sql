@@ -75,31 +75,30 @@ BEGIN
   ),
   adj_earn AS (
     SELECT a.employee_id,
-           jsonb_agg(jsonb_build_object('name', a.name, 'amount', a.amount)) FILTER (WHERE a.type='EARNING') AS items,
-           COALESCE(SUM(a.amount) FILTER (WHERE a.type='EARNING'), 0) AS total
+           jsonb_agg(jsonb_build_object('name', a.description, 'amount', a.amount)) FILTER (WHERE a.adjustment_type='EARNING') AS items,
+           COALESCE(SUM(a.amount) FILTER (WHERE a.adjustment_type='EARNING'), 0) AS total
     FROM public.payroll_adjustments a
     WHERE a.is_active
-      AND a.effective_from <= p_period_end
-      AND (a.effective_to IS NULL OR a.effective_to >= p_period_start)
+      AND a.effective_start <= p_period_end
+      AND (a.effective_end IS NULL OR a.effective_end >= p_period_start)
     GROUP BY a.employee_id
   ),
   adj_ded AS (
     SELECT a.employee_id,
-           jsonb_agg(jsonb_build_object('name', a.name, 'amount', a.amount)) FILTER (WHERE a.type='DEDUCTION') AS items,
-           COALESCE(SUM(a.amount) FILTER (WHERE a.type='DEDUCTION'), 0) AS total
+           jsonb_agg(jsonb_build_object('name', a.description, 'amount', a.amount)) FILTER (WHERE a.adjustment_type='DEDUCTION') AS items,
+           COALESCE(SUM(a.amount) FILTER (WHERE a.adjustment_type='DEDUCTION'), 0) AS total
     FROM public.payroll_adjustments a
     WHERE a.is_active
-      AND a.effective_from <= p_period_end
-      AND (a.effective_to IS NULL OR a.effective_to >= p_period_start)
+      AND a.effective_start <= p_period_end
+      AND (a.effective_end IS NULL OR a.effective_end >= p_period_start)
     GROUP BY a.employee_id
   ),
   bonus AS (
     SELECT b.employee_id, COALESCE(SUM(b.amount), 0) AS total
     FROM public.bonus_master b
-    WHERE b.status = 'APPROVED'
-      AND b.payroll_run_id IS NULL
-      AND b.period_start <= p_period_end
-      AND b.period_end >= p_period_start
+    WHERE b.is_active
+      AND b.effective_start <= p_period_end
+      AND b.effective_end >= p_period_start
     GROUP BY b.employee_id
   )
   SELECT
@@ -182,35 +181,34 @@ BEGIN
     'PENDING'
   FROM public.employees e
   LEFT JOIN (
-    SELECT employee_id, SUM(amount) FILTER (WHERE type='EARNING') AS total,
-           jsonb_agg(jsonb_build_object('name', name, 'amount', amount)) FILTER (WHERE type='EARNING') AS items
+    SELECT employee_id, SUM(amount) FILTER (WHERE adjustment_type='EARNING') AS total,
+           jsonb_agg(jsonb_build_object('name', description, 'amount', amount)) FILTER (WHERE adjustment_type='EARNING') AS items
     FROM public.payroll_adjustments
-    WHERE is_active AND effective_from <= p_period_end AND (effective_to IS NULL OR effective_to >= p_period_start)
+    WHERE is_active AND effective_start <= p_period_end AND (effective_end IS NULL OR effective_end >= p_period_start)
     GROUP BY employee_id
   ) ae ON ae.employee_id = e.id
   LEFT JOIN (
-    SELECT employee_id, SUM(amount) FILTER (WHERE type='DEDUCTION') AS total,
-           jsonb_agg(jsonb_build_object('name', name, 'amount', amount)) FILTER (WHERE type='DEDUCTION') AS items
+    SELECT employee_id, SUM(amount) FILTER (WHERE adjustment_type='DEDUCTION') AS total,
+           jsonb_agg(jsonb_build_object('name', description, 'amount', amount)) FILTER (WHERE adjustment_type='DEDUCTION') AS items
     FROM public.payroll_adjustments
-    WHERE is_active AND effective_from <= p_period_end AND (effective_to IS NULL OR effective_to >= p_period_start)
+    WHERE is_active AND effective_start <= p_period_end AND (effective_end IS NULL OR effective_end >= p_period_start)
     GROUP BY employee_id
   ) ad ON ad.employee_id = e.id
   LEFT JOIN (
     SELECT employee_id, SUM(amount) AS total,
            jsonb_agg(jsonb_build_object('name', description, 'amount', amount)) AS items
     FROM public.bonus_master
-    WHERE status = 'APPROVED' AND payroll_run_id IS NULL AND period_start <= p_period_end AND period_end >= p_period_start
+    WHERE is_active AND effective_start <= p_period_end AND effective_end >= p_period_start
     GROUP BY employee_id
   ) b ON b.employee_id = e.id
   WHERE e.employment_status IN ('ACTIVE','PROBATION')
     AND (p_employee_ids IS NULL OR e.id = ANY(p_employee_ids));
 
   UPDATE public.bonus_master
-  SET payroll_run_id = v_run_id, status = 'PAID'
-  WHERE status = 'APPROVED'
-    AND payroll_run_id IS NULL
-    AND period_start <= p_period_end
-    AND period_end >= p_period_start;
+  SET is_active = false
+  WHERE is_active = true
+    AND effective_start <= p_period_end
+    AND effective_end >= p_period_start;
 
   RETURN v_run_id;
 END;

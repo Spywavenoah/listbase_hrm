@@ -18891,31 +18891,30 @@ BEGIN
   ),
   adj_earn AS (
     SELECT a.employee_id,
-           jsonb_agg(jsonb_build_object('name', a.name, 'amount', a.amount)) FILTER (WHERE a.type='EARNING') AS items,
-           COALESCE(SUM(a.amount) FILTER (WHERE a.type='EARNING'), 0) AS total
+           jsonb_agg(jsonb_build_object('name', a.description, 'amount', a.amount)) FILTER (WHERE a.adjustment_type='EARNING') AS items,
+           COALESCE(SUM(a.amount) FILTER (WHERE a.adjustment_type='EARNING'), 0) AS total
     FROM public.payroll_adjustments a
     WHERE a.is_active
-      AND a.effective_from <= p_period_end
-      AND (a.effective_to IS NULL OR a.effective_to >= p_period_start)
+      AND a.effective_start <= p_period_end
+      AND (a.effective_end IS NULL OR a.effective_end >= p_period_start)
     GROUP BY a.employee_id
   ),
   adj_ded AS (
     SELECT a.employee_id,
-           jsonb_agg(jsonb_build_object('name', a.name, 'amount', a.amount)) FILTER (WHERE a.type='DEDUCTION') AS items,
-           COALESCE(SUM(a.amount) FILTER (WHERE a.type='DEDUCTION'), 0) AS total
+           jsonb_agg(jsonb_build_object('name', a.description, 'amount', a.amount)) FILTER (WHERE a.adjustment_type='DEDUCTION') AS items,
+           COALESCE(SUM(a.amount) FILTER (WHERE a.adjustment_type='DEDUCTION'), 0) AS total
     FROM public.payroll_adjustments a
     WHERE a.is_active
-      AND a.effective_from <= p_period_end
-      AND (a.effective_to IS NULL OR a.effective_to >= p_period_start)
+      AND a.effective_start <= p_period_end
+      AND (a.effective_end IS NULL OR a.effective_end >= p_period_start)
     GROUP BY a.employee_id
   ),
   bonus AS (
     SELECT b.employee_id, COALESCE(SUM(b.amount), 0) AS total
     FROM public.bonus_master b
-    WHERE b.status = 'APPROVED'
-      AND b.payroll_run_id IS NULL
-      AND b.period_start <= p_period_end
-      AND b.period_end >= p_period_start
+    WHERE b.is_active
+      AND b.effective_start <= p_period_end
+      AND b.effective_end >= p_period_start
     GROUP BY b.employee_id
   )
   SELECT
@@ -18935,10 +18934,9 @@ BEGIN
       (SELECT jsonb_agg(jsonb_build_object('name', b2.description, 'amount', b2.amount))
          FROM public.bonus_master b2
         WHERE b2.employee_id = base.employee_id
-          AND b2.status = 'APPROVED'
-          AND b2.payroll_run_id IS NULL
-          AND b2.period_start <= p_period_end
-          AND b2.period_end >= p_period_start), '[]'::jsonb
+          AND b2.is_active
+          AND b2.effective_start <= p_period_end
+          AND b2.effective_end >= p_period_start), '[]'::jsonb
     ) AS earnings,
     COALESCE(adj_ded.items, '[]'::jsonb) AS deductions
   FROM base
