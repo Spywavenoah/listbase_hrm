@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { ModuleListPage, type SummaryCard, type Column } from '@/components/shared/module-list-page';
-import { Wallet, FileText, CheckCircle, Clock, Calculator, Sparkles, Gift } from 'lucide-react';
+import { Wallet, FileText, CheckCircle, Clock, Sparkles, Gift, Trash2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -54,10 +54,12 @@ export default function PayrollPage() {
   const { employee: currentUser } = useAccess();
   const [runs, setRuns] = useState<PayrollRun[]>([]);
   const [loading, setLoading] = useState(true);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ name: '', pay_period_start: '', pay_period_end: '' });
   const [approveTarget, setApproveTarget] = useState<PayrollRun | null>(null);
   const [approving, setApproving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<PayrollRun | null>(null);
+  const [deleteCounts, setDeleteCounts] = useState<{ payslips: number; ledger: number } | null>(null);
+  const [deleteCounting, setDeleteCounting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [genForm, setGenForm] = useState({ name: '', pay_period_start: '', pay_period_end: '' });
   const [previewRows, setPreviewRows] = useState<PayrollPreviewRow[] | null>(null);
@@ -94,21 +96,53 @@ export default function PayrollPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const handleCreate = async () => {
+  const openDeleteRun = async (run: PayrollRun) => {
+    setDeleteTarget(run);
+    setDeleteCounts(null);
+    setDeleteCounting(true);
     try {
-      const { error } = await supabase.from('payroll_runs').insert({
-        name: form.name,
-        pay_period_start: form.pay_period_start,
-        pay_period_end: form.pay_period_end,
-        status: 'DRAFT',
-      });
+      const { data, error } = await supabase
+        .from('payslips')
+        .select('id')
+        .eq('payroll_run_id', run.id);
       if (error) throw error;
-      toast.success('Payroll run created');
-      setCreateOpen(false);
-      setForm({ name: '', pay_period_start: '', pay_period_end: '' });
+      const payslipIds = (data || []).map((p: { id: string }) => p.id);
+      let ledger = 0;
+      if (payslipIds.length > 0) {
+        const { count, error: ledgerError } = await supabase
+          .from('payslip_ledger')
+          .select('id', { count: 'exact', head: true })
+          .in('payslip_id', payslipIds);
+        if (ledgerError) throw ledgerError;
+        ledger = count || 0;
+      }
+      setDeleteCounts({ payslips: payslipIds.length, ledger });
+    } catch (err) {
+      toast.error('Failed to inspect run: ' + (err as Error).message);
+    } finally {
+      setDeleteCounting(false);
+    }
+  };
+
+  const confirmDeleteRun = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const { error } = await supabase.from('payroll_runs').delete().eq('id', deleteTarget.id);
+      if (error) throw error;
+      const counts = deleteCounts;
+      toast.success(
+        counts && (counts.payslips > 0 || counts.ledger > 0)
+          ? `Payroll run deleted with ${counts.payslips} payslip${counts.payslips === 1 ? '' : 's'} and ${counts.ledger} Recorder Keeper entr${counts.ledger === 1 ? 'y' : 'ies'}`
+          : 'Payroll run deleted'
+      );
+      setDeleteTarget(null);
+      setDeleteCounts(null);
       load();
     } catch (err) {
-      toast.error('Failed: ' + (err as Error).message);
+      toast.error('Failed to delete: ' + (err as Error).message);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -116,6 +150,16 @@ export default function PayrollPage() {
     if (!approveTarget) return;
     setApproving(true);
     try {
+      const { count, error: countError } = await supabase
+        .from('payslips')
+        .select('id', { count: 'exact', head: true })
+        .eq('payroll_run_id', approveTarget.id);
+      if (countError) throw countError;
+      if ((count || 0) === 0) {
+        toast.error('This run has no payslips. Generate payslips for the period first.');
+        return;
+      }
+
       let approverId: string | null = null;
       if (currentUser) {
         approverId = currentUser.id;
@@ -197,12 +241,12 @@ export default function PayrollPage() {
     }
     setCreating(true);
     try {
-      const runId = await generatePayrollRun({
+      await generatePayrollRun({
         name: genForm.name,
         pay_period_start: genForm.pay_period_start,
         pay_period_end: genForm.pay_period_end,
       });
-      toast.success(`Payroll run generated (${runId})`);
+      toast.success('Payroll run and payslips generated. Check Payslips and Recorder Keeper.');
       setGenOpen(false);
       setPreviewRows(null);
       setGenForm({ name: '', pay_period_start: '', pay_period_end: '' });
@@ -329,29 +373,33 @@ export default function PayrollPage() {
         data={runs}
         loading={loading}
         searchPlaceholder="Search payroll runs..."
-        createLabel="New Run"
+        createLabel="Generate Payslips"
         toolbarActions={
-          <>
-            <Button size="sm" variant="outline" onClick={openGenerate}>
-              <Calculator className="mr-2 h-4 w-4" />
-              <span className="hidden sm:inline">Generate Payslips</span>
-              <span className="sm:hidden">Generate</span>
-            </Button>
-            <Button size="sm" variant="outline" onClick={openBonuses}>
-              <Gift className="mr-2 h-4 w-4" />
-              <span className="hidden sm:inline">Bonuses</span>
-              <span className="sm:hidden">Bonuses</span>
-            </Button>
-          </>
+          <Button size="sm" variant="outline" onClick={openBonuses}>
+            <Gift className="mr-2 h-4 w-4" />
+            <span className="hidden sm:inline">Bonuses</span>
+            <span className="sm:hidden">Bonuses</span>
+          </Button>
         }
-        onCreate={() => setCreateOpen(true)}
-        rowActions={(r) =>
-          r.status === 'DRAFT' || r.status === 'REVIEWED' ? (
-            <Button size="sm" variant="outline" className="h-7 text-success" onClick={() => setApproveTarget(r)}>
-              Approve
+        onCreate={openGenerate}
+        rowActions={(r) => (
+          <div className="flex items-center gap-1">
+            {(r.status === 'DRAFT' || r.status === 'REVIEWED') && (
+              <Button size="sm" variant="outline" className="h-7 text-success" onClick={() => setApproveTarget(r)}>
+                Approve
+              </Button>
+            )}
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 text-destructive"
+              title={`Delete ${r.name}`}
+              onClick={() => openDeleteRun(r)}
+            >
+              <Trash2 className="h-4 w-4" />
             </Button>
-          ) : null
-        }
+          </div>
+        )}
       />
       <Dialog open={genOpen} onOpenChange={(open) => { setGenOpen(open); if (!open) setPreviewRows(null); }}>
         <DialogContent className="max-w-3xl">
@@ -438,32 +486,6 @@ export default function PayrollPage() {
             <Button onClick={handleGenerate} disabled={creating || !genForm.pay_period_start || !genForm.pay_period_end}>
               {creating ? 'Generating...' : 'Create Run & Payslips'}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>New Payroll Run</DialogTitle></DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-1.5">
-              <Label>Run Name</Label>
-              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="August 2026 Payroll" />
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label>Period Start</Label>
-                <Input type="date" value={form.pay_period_start} onChange={(e) => setForm({ ...form, pay_period_start: e.target.value })} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Period End</Label>
-                <Input type="date" value={form.pay_period_end} onChange={(e) => setForm({ ...form, pay_period_end: e.target.value })} />
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={!form.name}>Create</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -627,6 +649,39 @@ export default function PayrollPage() {
               onClick={(e) => { e.preventDefault(); handleApprove(); }}
             >
               {approving ? 'Approving...' : 'Confirm Approval'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open && !deleting) { setDeleteTarget(null); setDeleteCounts(null); } }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this payroll run?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget && (
+                <>
+                  You are about to permanently delete <strong>{deleteTarget.name}</strong> (period {deleteTarget.pay_period_start} to {deleteTarget.pay_period_end}).
+                  {deleteCounting ? (
+                    <> Checking what will be removed...</>
+                  ) : deleteCounts && (deleteCounts.payslips > 0 || deleteCounts.ledger > 0) ? (
+                    <> This will also delete <strong>{deleteCounts.payslips}</strong> payslip{deleteCounts.payslips === 1 ? '' : 's'} and <strong>{deleteCounts.ledger}</strong> Recorder Keeper entr{deleteCounts.ledger === 1 ? 'y' : 'ies'} linked to this run.</>
+                  ) : (
+                    <> This run has no payslips or Recorder Keeper entries.</>
+                  )}
+                  {' '}This action cannot be undone.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleting || deleteCounting}
+              onClick={(e) => { e.preventDefault(); confirmDeleteRun(); }}
+            >
+              {deleting ? 'Deleting...' : 'Delete Run'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

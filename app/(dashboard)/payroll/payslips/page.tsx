@@ -5,6 +5,7 @@ import { ModuleListPage, type SummaryCard, type Column } from '@/components/shar
 import { FileText, CheckCircle, Clock, DollarSign } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
+import { toast } from 'sonner';
 
 interface Payslip {
   id: string;
@@ -30,11 +31,13 @@ export default function PayslipsPage() {
         supabase.from('employees').select('id, first_name, last_name'),
         supabase.from('payroll_runs').select('id, name'),
       ]);
+      if (pRes.error) throw pRes.error;
       setPayslips((pRes.data || []) as unknown as Payslip[]);
       setEmployees(eRes.data || []);
       setRuns(rRes.data || []);
     } catch (err) {
       console.error(err);
+      toast.error('Failed to load payslips: ' + (err as Error).message);
     } finally {
       setLoading(false);
     }

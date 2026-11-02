@@ -40,6 +40,34 @@ export async function previewPayroll(req: PayrollRunRequest): Promise<PayrollPre
 }
 
 export async function generatePayrollRun(req: PayrollRunRequest): Promise<string> {
+  // Remove abandoned runs for this period (no payslips) so they do not
+  // block generation. Runs that already contain payslips are kept and the
+  // RPC will reject the duplicate below.
+  const { data: existing, error: existingError } = await supabase
+    .from('payroll_runs')
+    .select('id')
+    .eq('pay_period_start', req.pay_period_start)
+    .eq('pay_period_end', req.pay_period_end)
+    .neq('status', 'VOID');
+  if (existingError) throw existingError;
+
+  const existingIds = (existing || []).map((r: { id: string }) => r.id);
+  if (existingIds.length > 0) {
+    const { data: slips, error: slipsError } = await supabase
+      .from('payslips')
+      .select('id')
+      .in('payroll_run_id', existingIds)
+      .limit(1);
+    if (slipsError) throw slipsError;
+    if (!slips || slips.length === 0) {
+      const { error: deleteError } = await supabase
+        .from('payroll_runs')
+        .delete()
+        .in('id', existingIds);
+      if (deleteError) throw deleteError;
+    }
+  }
+
   const { data, error } = await supabase.rpc('generate_payroll_run', {
     p_name: req.name,
     p_period_start: req.pay_period_start,
