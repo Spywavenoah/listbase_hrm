@@ -7,8 +7,24 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { supabase } from '@/lib/supabase/client';
 import { toast } from 'sonner';
-import { BookOpen, Download, Landmark, ReceiptText, Search, ShieldCheck, Wallet } from 'lucide-react';
+import {
+  BookOpen,
+  Download,
+  FileSpreadsheet,
+  FileText,
+  Landmark,
+  ReceiptText,
+  Search,
+  ShieldCheck,
+  Wallet,
+} from 'lucide-react';
 import { csvFileName, downloadCsv } from '@/lib/export/csv';
+import { getBrandVariables } from '@/lib/letterhead';
+import {
+  downloadRegisterPdf,
+  type RegisterDocumentCompany,
+  type RegisterDocumentRow,
+} from '@/lib/payroll/register-pdf';
 
 type DeductionType = 'PENSION' | 'PAYE' | 'NSITF' | 'OTHER';
 
@@ -120,6 +136,10 @@ export default function RecorderKeeperPage() {
   const [typeFilter, setTypeFilter] = useState<'ALL' | DeductionType>('ALL');
   const [adminFilter, setAdminFilter] = useState('ALL');
   const [runFilter, setRunFilter] = useState('ALL');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+  const [company, setCompany] = useState<RegisterDocumentCompany>({});
+  const [exporting, setExporting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -189,6 +209,18 @@ export default function RecorderKeeperPage() {
       setAdminOptions(
         Array.from(new Set([...configured, ...fromEmployees])).sort((a, b) => a.localeCompare(b))
       );
+
+      try {
+        const vars = await getBrandVariables();
+        setCompany({
+          name: vars.company_name,
+          address: vars.company_address,
+          phone: vars.company_phone,
+          email: vars.company_email,
+        });
+      } catch {
+        setCompany({});
+      }
     } catch (err) {
       toast.error('Failed to load deduction register: ' + (err as Error).message);
     } finally {
@@ -257,6 +289,9 @@ export default function RecorderKeeperPage() {
         if (row.type !== 'PENSION' || row.pensionAdministrator !== adminFilter) return false;
       }
       if (runFilter !== 'ALL' && row.runId !== runFilter) return false;
+      // Periods overlap the selected window (inclusive).
+      if (fromDate && (row.periodEnd || row.periodStart || '') < fromDate) return false;
+      if (toDate && (row.periodStart || row.periodEnd || '') > toDate) return false;
       if (!term) return true;
       return [
         row.employeeName,
@@ -272,7 +307,7 @@ export default function RecorderKeeperPage() {
         .filter(Boolean)
         .some((value) => value.toLowerCase().includes(term));
     });
-  }, [rows, search, typeFilter, adminFilter, runFilter]);
+  }, [rows, search, typeFilter, adminFilter, runFilter, fromDate, toDate]);
 
   const totals = useMemo(() => {
     const result = {
@@ -307,48 +342,129 @@ export default function RecorderKeeperPage() {
     [runs]
   );
 
-  const exportRows = () => {
-    if (filtered.length === 0) {
+  const hasActiveFilters =
+    !!search.trim() ||
+    typeFilter !== 'ALL' ||
+    adminFilter !== 'ALL' ||
+    runFilter !== 'ALL' ||
+    !!fromDate ||
+    !!toDate;
+
+  const resetFilters = () => {
+    setSearch('');
+    setTypeFilter('ALL');
+    setAdminFilter('ALL');
+    setRunFilter('ALL');
+    setFromDate('');
+    setToDate('');
+  };
+
+  const REGISTER_HEADERS = [
+    'Period Start',
+    'Period End',
+    'Payroll Run',
+    'Payslip Number',
+    'Deduction Type',
+    'Employee Staff ID',
+    'Employee Name',
+    'Pension PIN',
+    'Pension Administrator',
+    'Tax ID',
+    'NSITF Number',
+    'Employee Amount',
+    'Employer Amount',
+    'Total Amount',
+  ];
+
+  const csvRow = (row: RegisterRow) => [
+    row.periodStart || '',
+    row.periodEnd || '',
+    row.runName,
+    row.payslipNumber,
+    TYPE_LABELS[row.type],
+    row.staffId,
+    row.employeeName,
+    row.type === 'PENSION' ? row.pensionPin : '',
+    row.type === 'PENSION' ? row.pensionAdministrator : '',
+    row.type === 'PAYE' ? row.taxId : '',
+    row.type === 'NSITF' ? row.nsitfNumber : '',
+    row.employeeAmount,
+    row.employerAmount,
+    row.total,
+  ];
+
+  const registerDocumentRows = (list: RegisterRow[]): RegisterDocumentRow[] =>
+    list.map((row) => ({
+      periodStart: row.periodStart,
+      periodEnd: row.periodEnd,
+      runName: row.runName,
+      payslipNumber: row.payslipNumber,
+      typeLabel: TYPE_LABELS[row.type],
+      staffId: row.staffId,
+      employeeName: row.employeeName,
+      pensionPin: row.pensionPin,
+      pensionAdministrator: row.pensionAdministrator,
+      taxId: row.taxId,
+      nsitfNumber: row.nsitfNumber,
+      employeeAmount: row.employeeAmount,
+      employerAmount: row.employerAmount,
+      total: row.total,
+    }));
+
+  const totalsFor = (list: RegisterRow[]) =>
+    list.reduce(
+      (acc, row) => ({
+        employee: acc.employee + row.employeeAmount,
+        employer: acc.employer + row.employerAmount,
+        total: acc.total + row.total,
+      }),
+      { employee: 0, employer: 0, total: 0 }
+    );
+
+  const fileBase = (suffix?: string) => {
+    const parts = ['recorder_keeper'];
+    if (suffix) parts.push(suffix);
+    if (typeFilter !== 'ALL') parts.push(typeFilter.toLowerCase());
+    if (adminFilter !== 'ALL') parts.push(adminFilter);
+    if (fromDate) parts.push(`from_${fromDate}`);
+    if (toDate) parts.push(`to_${toDate}`);
+    return parts.join('_');
+  };
+
+  const exportCsv = (list: RegisterRow[], suffix?: string) => {
+    if (list.length === 0) {
       toast.error('There are no entries to export for the selected filters');
       return;
     }
-    const headers = [
-      'Period Start',
-      'Period End',
-      'Payroll Run',
-      'Payslip Number',
-      'Deduction Type',
-      'Employee Staff ID',
-      'Employee Name',
-      'Pension PIN',
-      'Pension Administrator',
-      'Tax ID',
-      'NSITF Number',
-      'Employee Amount',
-      'Employer Amount',
-      'Total Amount',
-    ];
-    const data = filtered.map((row) => [
-      row.periodStart || '',
-      row.periodEnd || '',
-      row.runName,
-      row.payslipNumber,
-      TYPE_LABELS[row.type],
-      row.staffId,
-      row.employeeName,
-      row.type === 'PENSION' ? row.pensionPin : '',
-      row.type === 'PENSION' ? row.pensionAdministrator : '',
-      row.type === 'PAYE' ? row.taxId : '',
-      row.type === 'NSITF' ? row.nsitfNumber : '',
-      row.employeeAmount,
-      row.employerAmount,
-      row.total,
-    ]);
-    const parts = ['recorder_keeper'];
-    if (typeFilter !== 'ALL') parts.push(typeFilter.toLowerCase());
-    if (adminFilter !== 'ALL') parts.push(adminFilter);
-    downloadCsv(csvFileName(parts.join('_')), headers, data);
-    toast.success(`Exported ${filtered.length} register entr${filtered.length === 1 ? 'y' : 'ies'}`);
+    downloadCsv(csvFileName(fileBase(suffix)), REGISTER_HEADERS, list.map(csvRow));
+    toast.success(`Exported ${list.length} register entr${list.length === 1 ? 'y' : 'ies'} to CSV`);
+  };
+
+  const exportPdf = async (list: RegisterRow[], suffix?: string) => {
+    if (list.length === 0) {
+      toast.error('There are no entries to export for the selected filters');
+      return;
+    }
+    setExporting(true);
+    try {
+      const windowLabel =
+        fromDate || toDate
+          ? `Period ${fromDate || 'start'} to ${toDate || 'date'}`
+          : 'All periods';
+      const pdfName = `${fileBase(suffix).toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${new Date().toISOString().slice(0, 10)}.pdf`;
+      await downloadRegisterPdf(pdfName, {
+        title: 'Deduction & Remittance Register',
+        subtitle: windowLabel,
+        rows: registerDocumentRows(list),
+        totals: totalsFor(list),
+        company,
+      });
+      toast.success(`Exported ${list.length} register entr${list.length === 1 ? 'y' : 'ies'} to PDF`);
+    } catch (err) {
+      toast.error('Failed to export register PDF: ' + (err as Error).message);
+    } finally {
+      setExporting(false);
+    }
   };
 
   const cards = [
@@ -391,9 +507,14 @@ export default function RecorderKeeperPage() {
             Statutory deduction register. Every entry carries the employee&apos;s staff ID, statutory PIN and pension administrator so it can be filtered, exported and remitted to PFAs, tax authorities and NSITF.
           </p>
         </div>
-        <Button onClick={exportRows} className="shrink-0">
-          <Download className="mr-2 h-4 w-4" /> Export CSV
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={() => exportCsv(filtered)} disabled={filtered.length === 0}>
+            <FileSpreadsheet className="mr-2 h-4 w-4" /> Export CSV
+          </Button>
+          <Button onClick={() => exportPdf(filtered)} disabled={filtered.length === 0 || exporting}>
+            <Download className="mr-2 h-4 w-4" /> {exporting ? 'Preparing...' : 'Export PDF'}
+          </Button>
+        </div>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -465,6 +586,39 @@ export default function RecorderKeeperPage() {
               ))}
             </select>
           </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
+            <div className="space-y-1">
+              <label htmlFor="register-from" className="text-xs font-medium text-muted-foreground">
+                Period from
+              </label>
+              <Input
+                id="register-from"
+                type="date"
+                className="w-full sm:w-auto"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(e) => setFromDate(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="register-to" className="text-xs font-medium text-muted-foreground">
+                Period to
+              </label>
+              <Input
+                id="register-to"
+                type="date"
+                className="w-full sm:w-auto"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(e) => setToDate(e.target.value)}
+              />
+            </div>
+            {hasActiveFilters && (
+              <Button variant="ghost" size="sm" onClick={resetFilters}>
+                Reset filters
+              </Button>
+            )}
+          </div>
           {adminFilter !== 'ALL' && (
             <p className="text-xs text-muted-foreground">
               Showing the pension report for <strong>{adminFilter}</strong>. Export CSV will contain only this administrator&apos;s entries.
@@ -492,7 +646,8 @@ export default function RecorderKeeperPage() {
                     <th className="py-2 pr-3 text-right">Employer</th>
                     <th className="py-2 pr-3 text-right">Total</th>
                     <th className="py-2 pr-3">Payslip</th>
-                    <th className="py-2">Run</th>
+                    <th className="py-2 pr-3">Run</th>
+                    <th className="py-2 text-right">Export</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -516,7 +671,34 @@ export default function RecorderKeeperPage() {
                       <td className="py-2 pr-3 text-right whitespace-nowrap">{money(row.employerAmount)}</td>
                       <td className="py-2 pr-3 text-right whitespace-nowrap font-medium">{money(row.total)}</td>
                       <td className="py-2 pr-3 font-mono text-xs">{row.payslipNumber || '—'}</td>
-                      <td className="py-2 whitespace-nowrap">{row.runName || '—'}</td>
+                      <td className="py-2 pr-3 whitespace-nowrap">{row.runName || '—'}</td>
+                      <td className="py-2">
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7"
+                            title="Download this entry as CSV"
+                            onClick={() =>
+                              exportCsv([row], `${row.employeeName}_${row.type.toLowerCase()}`)
+                            }
+                          >
+                            <FileSpreadsheet className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7"
+                            title="Download this entry as PDF"
+                            onClick={() =>
+                              exportPdf([row], `${row.employeeName}_${row.type.toLowerCase()}`)
+                            }
+                            disabled={exporting}
+                          >
+                            <FileText className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -528,6 +710,7 @@ export default function RecorderKeeperPage() {
                     <td className="py-2 pr-3 text-right whitespace-nowrap">{money(totals.employee)}</td>
                     <td className="py-2 pr-3 text-right whitespace-nowrap">{money(totals.employer)}</td>
                     <td className="py-2 pr-3 text-right whitespace-nowrap">{money(totals.total)}</td>
+                    <td className="py-2 pr-3" />
                     <td className="py-2 pr-3" />
                     <td className="py-2" />
                   </tr>

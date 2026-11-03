@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, ReactNode } from 'react';
+import { useState, useMemo, useEffect, ReactNode } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -32,6 +32,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Checkbox } from '@/components/ui/checkbox';
 import { downloadCsv, csvFileName, type CsvValue } from '@/lib/export/csv';
 
 export interface SummaryCard {
@@ -74,6 +75,12 @@ interface ModuleListPageProps<T> {
   pageSize?: number;
   statusKey?: string;
   statusValue?: (row: T) => string;
+  /** Render a checkbox column so callers can act on several rows at once. */
+  selectable?: boolean;
+  /** Bulk actions rendered while one or more rows are selected. */
+  bulkActions?: (rows: T[]) => ReactNode;
+  /** Change this value to clear the current selection (e.g. after a bulk action). */
+  selectionResetToken?: unknown;
 }
 
 const colorClasses: Record<string, string> = {
@@ -109,6 +116,9 @@ export function ModuleListPage<T extends { id?: string }>({
   pageSize = 10,
   statusKey,
   statusValue,
+  selectable = false,
+  bulkActions,
+  selectionResetToken,
 }: ModuleListPageProps<T>) {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
@@ -116,6 +126,22 @@ export function ModuleListPage<T extends { id?: string }>({
   const [deleteTarget, setDeleteTarget] = useState<T | null>(null);
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [selectionResetToken]);
+
+  const rowKey = (row: T, idx: number): string => row.id || `__row_${idx}`;
+
+  const selectedRows = useMemo(
+    () => data.filter((row) => !!row.id && selectedIds.includes(row.id)),
+    [data, selectedIds]
+  );
+
+  const toggleRowSelection = (key: string) => {
+    setSelectedIds((ids) => (ids.includes(key) ? ids.filter((id) => id !== key) : [...ids, key]));
+  };
 
   const toggleSort = (key: string) => {
     if (sortKey === key) {
@@ -196,6 +222,19 @@ export function ModuleListPage<T extends { id?: string }>({
 
   const hasRowMenu = onEdit || onDelete;
   const showStatusFilter = statusOptions.length > 1 || (statusKey || statusValue ? statusOptions.length > 0 : false);
+
+  const pageKey = (row: T, idx: number) => rowKey(row, currentPage * pageSize + idx);
+  const selectedOnPage = paged.filter((row, idx) => selectedIds.includes(pageKey(row, idx)));
+  const allPageSelected = paged.length > 0 && selectedOnPage.length === paged.length;
+  const somePageSelected = selectedOnPage.length > 0 && !allPageSelected;
+
+  const togglePageSelection = () => {
+    const keys = paged.map((row, idx) => pageKey(row, idx));
+    setSelectedIds((ids) => {
+      if (allPageSelected) return ids.filter((id) => !keys.includes(id));
+      return Array.from(new Set([...ids, ...keys]));
+    });
+  };
 
   const exportCell = (col: Column<T>, row: T): CsvValue => {
     if (col.exportValue) return col.exportValue(row);
@@ -312,10 +351,33 @@ export function ModuleListPage<T extends { id?: string }>({
             )}
           </div>
 
+          {selectable && selectedRows.length > 0 && (
+            <div className="flex flex-wrap items-center gap-3 border-b border-border bg-muted/40 px-4 py-2 print:hidden">
+              <span className="text-sm font-medium">
+                {selectedRows.length} selected
+              </span>
+              <Button variant="ghost" size="sm" onClick={() => setSelectedIds([])}>
+                Clear
+              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                {bulkActions?.(selectedRows)}
+              </div>
+            </div>
+          )}
+
           <div className="overflow-x-auto scrollbar-thin">
             <Table className="min-w-[640px]">
               <TableHeader>
                 <TableRow>
+                  {selectable && (
+                    <TableHead className="w-10 print:hidden">
+                      <Checkbox
+                        checked={allPageSelected ? true : somePageSelected ? 'indeterminate' : false}
+                        onCheckedChange={togglePageSelection}
+                        aria-label="Select all rows on this page"
+                      />
+                    </TableHead>
+                  )}
                   {columns.map((col) => {
                     const sortable = col.sortable !== false;
                     return (
@@ -345,6 +407,9 @@ export function ModuleListPage<T extends { id?: string }>({
                 {loading ? (
                   Array.from({ length: 5 }).map((_, i) => (
                     <TableRow key={i}>
+                      {selectable && (
+                        <TableCell className="print:hidden"><Skeleton className="h-4 w-4" /></TableCell>
+                      )}
                       {columns.map((col) => (
                         <TableCell key={col.key}>
                           <Skeleton className="h-5 w-full" />
@@ -356,7 +421,7 @@ export function ModuleListPage<T extends { id?: string }>({
                 ) : paged.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={columns.length + (rowActions || hasRowMenu ? 1 : 0)}
+                      colSpan={columns.length + (rowActions || hasRowMenu ? 1 : 0) + (selectable ? 1 : 0)}
                       className="h-32"
                     >
                       <div className="flex flex-col items-center justify-center gap-2 text-muted-foreground">
@@ -379,6 +444,15 @@ export function ModuleListPage<T extends { id?: string }>({
                       className={onRowClick ? 'cursor-pointer hover:bg-accent/50' : ''}
                       onClick={() => onRowClick?.(row)}
                     >
+                      {selectable && (
+                        <TableCell className="w-10 print:hidden" onClick={(e) => e.stopPropagation()}>
+                          <Checkbox
+                            checked={selectedIds.includes(pageKey(row, idx))}
+                            onCheckedChange={() => toggleRowSelection(pageKey(row, idx))}
+                            aria-label="Select row"
+                          />
+                        </TableCell>
+                      )}
                       {columns.map((col) => (
                         <TableCell key={col.key} className={col.className}>
                           {col.render
