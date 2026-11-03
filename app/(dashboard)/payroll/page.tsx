@@ -246,7 +246,7 @@ export default function PayrollPage() {
         pay_period_start: genForm.pay_period_start,
         pay_period_end: genForm.pay_period_end,
       });
-      toast.success('Payroll run and payslips generated. Check Payslips and Recorder Keeper.');
+      toast.success('Payroll run and payslips generated. See Payslips for the breakdown and Recorder Keeper for statutory remittances.');
       setGenOpen(false);
       setPreviewRows(null);
       setGenForm({ name: '', pay_period_start: '', pay_period_end: '' });
