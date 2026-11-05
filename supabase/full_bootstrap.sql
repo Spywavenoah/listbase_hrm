@@ -18845,7 +18845,11 @@ RETURNS TABLE (
   net numeric,
   bonus_total numeric,
   earnings jsonb,
-  deductions jsonb
+  deductions jsonb,
+  timecard_days integer,
+  worked_hours numeric,
+  expected_hours numeric,
+  timecard_mode text
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -18853,97 +18857,51 @@ SET search_path = public
 AS $$
 DECLARE
   v_tax_rate numeric := 0.10;
+  v_row jsonb;
+  v_emp_id uuid;
 BEGIN
   IF NOT public.has_privilege('payroll.manage') AND NOT public.has_privilege('payroll.view') THEN
     RAISE EXCEPTION 'Not authorized to preview payroll';
   END IF;
 
-  SELECT COALESCE((value)::numeric, 10)/100 INTO v_tax_rate
+  SELECT COALESCE((value #>> '{}')::numeric, 10)/100 INTO v_tax_rate
   FROM public.system_settings
   WHERE group_name = 'payroll' AND key = 'tax_rate_pct'
   LIMIT 1;
+  v_tax_rate := COALESCE(v_tax_rate, 0.10);
 
-  RETURN QUERY
-  WITH base AS (
-    SELECT
-      e.id AS employee_id,
-      trim(coalesce(e.first_name,'') || ' ' || coalesce(e.last_name,'')) AS name,
-      d.name AS department,
-      COALESCE(e.annual_salary/12, e.monthly_salary, 0) AS monthly_salary,
-      GREATEST(1, (p_period_end - p_period_start + 1)) AS period_days,
-      (SELECT COUNT(*)::int
-         FROM public.holidays h
-        WHERE h.holiday_date BETWEEN p_period_start AND p_period_end
-          AND h.is_active) AS holidays_in_period
-    FROM public.employees e
-    LEFT JOIN public.departments d ON d.id = e.department_id
-    WHERE e.employment_status IN ('ACTIVE','PROBATION')
-      AND (p_employee_ids IS NULL OR e.id = ANY(p_employee_ids))
-  ),
-  leave_unpaid AS (
-    SELECT lr.employee_id, COUNT(*)::int AS unpaid_days
-    FROM public.leave_requests lr
-    WHERE lr.status = 'APPROVED'
-      AND lr.start_date <= p_period_end
-      AND lr.end_date >= p_period_start
-      AND COALESCE(lr.is_paid, true) = false
-    GROUP BY lr.employee_id
-  ),
-  adj_earn AS (
-    SELECT a.employee_id,
-           jsonb_agg(jsonb_build_object('name', a.description, 'amount', a.amount)) FILTER (WHERE a.adjustment_type='EARNING') AS items,
-           COALESCE(SUM(a.amount) FILTER (WHERE a.adjustment_type='EARNING'), 0) AS total
-    FROM public.payroll_adjustments a
-    WHERE a.is_active
-      AND a.effective_start <= p_period_end
-      AND (a.effective_end IS NULL OR a.effective_end >= p_period_start)
-    GROUP BY a.employee_id
-  ),
-  adj_ded AS (
-    SELECT a.employee_id,
-           jsonb_agg(jsonb_build_object('name', a.description, 'amount', a.amount)) FILTER (WHERE a.adjustment_type='DEDUCTION') AS items,
-           COALESCE(SUM(a.amount) FILTER (WHERE a.adjustment_type='DEDUCTION'), 0) AS total
-    FROM public.payroll_adjustments a
-    WHERE a.is_active
-      AND a.effective_start <= p_period_end
-      AND (a.effective_end IS NULL OR a.effective_end >= p_period_start)
-    GROUP BY a.employee_id
-  ),
-  bonus AS (
-    SELECT b.employee_id, COALESCE(SUM(b.amount), 0) AS total
-    FROM public.bonus_master b
-    WHERE b.is_active
-      AND b.effective_start <= p_period_end
-      AND b.effective_end >= p_period_start
-    GROUP BY b.employee_id
-  )
-  SELECT
-    base.employee_id,
-    base.name,
-    base.department,
-    base.monthly_salary,
-    GREATEST(0, base.period_days - base.holidays_in_period)::int AS working_days,
-    COALESCE(leave_unpaid.unpaid_days, 0)::int AS unpaid_days,
-    ROUND(base.monthly_salary, 2) AS gross,
-    ROUND(base.monthly_salary * v_tax_rate, 2) AS tax,
-    ROUND(COALESCE(adj_earn.total,0) + COALESCE(bonus.total,0), 2) AS earnings_total,
-    ROUND(COALESCE(adj_ded.total,0), 2) AS deductions_total,
-    ROUND(base.monthly_salary + COALESCE(adj_earn.total,0) + COALESCE(bonus.total,0) - (base.monthly_salary * v_tax_rate) - COALESCE(adj_ded.total,0), 2) AS net,
-    ROUND(COALESCE(bonus.total,0), 2) AS bonus_total,
-    COALESCE(adj_earn.items, '[]'::jsonb) || COALESCE(
-      (SELECT jsonb_agg(jsonb_build_object('name', b2.description, 'amount', b2.amount))
-         FROM public.bonus_master b2
-        WHERE b2.employee_id = base.employee_id
-          AND b2.is_active
-          AND b2.effective_start <= p_period_end
-          AND b2.effective_end >= p_period_start), '[]'::jsonb
-    ) AS earnings,
-    COALESCE(adj_ded.items, '[]'::jsonb) AS deductions
-  FROM base
-  LEFT JOIN leave_unpaid ON leave_unpaid.employee_id = base.employee_id
-  LEFT JOIN adj_earn ON adj_earn.employee_id = base.employee_id
-  LEFT JOIN adj_ded ON adj_ded.employee_id = base.employee_id
-  LEFT JOIN bonus ON bonus.employee_id = base.employee_id;
+  -- Reuse the same calculation the run generator uses so the preview always
+  -- matches the generated payslips (including HOURS mode and expected hours).
+  FOR v_emp_id IN
+    SELECT e.id
+      FROM public.employees e
+     WHERE e.employment_status IN ('ACTIVE','PROBATION')
+       AND (p_employee_ids IS NULL OR e.id = ANY(p_employee_ids))
+     ORDER BY e.first_name, e.last_name
+  LOOP
+    v_row := public._payroll_calc_for(v_emp_id, p_period_start, p_period_end, v_tax_rate);
+
+    employee_id      := (v_row->>'employee_id')::uuid;
+    name             := COALESCE(v_row->>'name', '');
+    department       := COALESCE(v_row->>'department', 'Unassigned');
+    monthly_salary   := COALESCE((v_row->>'monthly_salary')::numeric, 0);
+    working_days     := COALESCE((v_row->>'working_days')::int, 0);
+    unpaid_days      := COALESCE((v_row->>'unpaid_days')::int, 0);
+    gross            := COALESCE((v_row->>'gross')::numeric, 0);
+    tax              := COALESCE((v_row->>'tax')::numeric, 0);
+    earnings_total   := COALESCE((v_row->>'earnings_total')::numeric, 0);
+    deductions_total := COALESCE((v_row->>'deductions_total')::numeric, 0);
+    net              := COALESCE((v_row->>'net')::numeric, 0);
+    bonus_total      := COALESCE((v_row->>'bonus_total')::numeric, 0);
+    earnings         := COALESCE(v_row->'earnings', '[]'::jsonb);
+    deductions       := COALESCE(v_row->'deductions', '[]'::jsonb);
+    timecard_days    := COALESCE((v_row->>'timecard_days')::int, 0);
+    worked_hours     := COALESCE((v_row->>'worked_hours')::numeric, 0);
+    expected_hours   := COALESCE((v_row->>'expected_hours')::numeric, 0);
+    timecard_mode    := COALESCE(v_row->>'timecard_mode', 'DAYS');
+
+    RETURN NEXT;
+  END LOOP;
 END;
 $$;
 
@@ -20527,6 +20485,9 @@ DECLARE
   v_timecard_days integer := 0;
   v_worked_hours numeric := 0;
   v_expected_hours numeric := 0;
+  v_default_expected_hours numeric := 0;
+  v_employee_expected_hours numeric := 0;
+  v_expected_overrides jsonb;
   v_basic numeric := 0;
 BEGIN
   SELECT COALESCE(NULLIF(e.annual_salary, 0) / 12, e.monthly_salary, 0),
@@ -20551,6 +20512,39 @@ BEGIN
     FROM public.system_settings
    WHERE group_name = 'payroll' AND key = 'hours_per_day'
    LIMIT 1;
+
+  -- Expected hours resolution: employee override -> global default ->
+  -- working days * hours per day. Stored as JSONB so no DDL is required.
+  SELECT COALESCE((value #>> '{}')::numeric, 0) INTO v_default_expected_hours
+    FROM public.system_settings
+   WHERE group_name = 'payroll' AND key = 'default_expected_hours'
+   LIMIT 1;
+
+  SELECT value INTO v_expected_overrides
+    FROM public.system_settings
+   WHERE group_name = 'payroll' AND key = 'employee_expected_hours'
+   LIMIT 1;
+
+  IF v_expected_overrides IS NOT NULL THEN
+    IF jsonb_typeof(v_expected_overrides) = 'object' THEN
+      v_employee_expected_hours := COALESCE(
+        NULLIF(v_expected_overrides->>(p_employee_id::text), '')::numeric,
+        0
+      );
+    ELSIF jsonb_typeof(v_expected_overrides) = 'array' THEN
+      SELECT COALESCE(MAX(
+               COALESCE(
+                 NULLIF(o->>'expected_hours', '')::numeric,
+                 NULLIF(o->>'hours', '')::numeric,
+                 0
+               )
+             ), 0)
+        INTO v_employee_expected_hours
+        FROM jsonb_array_elements(v_expected_overrides) o
+       WHERE o->>'employee_id' = p_employee_id::text
+          OR o->>'id' = p_employee_id::text;
+    END IF;
+  END IF;
 
   v_working_days := (
     SELECT count(*)::int
@@ -20590,7 +20584,11 @@ BEGIN
      AND a.status IN ('PRESENT','LATE','HALF_DAY','REMOTE','ONSITE');
 
   IF v_mode = 'HOURS' AND v_timecard_days > 0 AND v_working_days > 0 THEN
-    v_expected_hours := GREATEST(v_working_days - v_unpaid_days, 0) * GREATEST(v_hours_per_day, 1);
+    v_expected_hours := COALESCE(
+      NULLIF(v_employee_expected_hours, 0),
+      NULLIF(v_default_expected_hours, 0),
+      GREATEST(v_working_days - v_unpaid_days, 0)::numeric * GREATEST(v_hours_per_day, 1)
+    );
     IF v_expected_hours > 0 THEN
       v_gross_base := round(LEAST(v_monthly_salary, v_monthly_salary * v_worked_hours / v_expected_hours), 2);
     ELSE
@@ -20726,6 +20724,9 @@ BEGIN
     'basic',            v_basic,
     'timecard_days',    v_timecard_days,
     'worked_hours',     round(v_worked_hours, 2),
+    'expected_hours',   round(v_expected_hours, 2),
+    'default_expected_hours', v_default_expected_hours,
+    'employee_expected_hours', v_employee_expected_hours,
     'timecard_mode',    v_mode
   );
 END;

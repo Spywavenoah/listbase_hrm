@@ -344,6 +344,8 @@ export default function PayrollPage() {
     DISBURSED: 'bg-success/10 text-success',
   };
 
+  const showPreviewHours = !!previewRows?.some((r) => r.timecard_mode === 'HOURS');
+
   const summaryCards: SummaryCard[] = [
     { label: 'Total Runs', value: runs.length, icon: Wallet, color: 'primary' },
     { label: 'Draft', value: runs.filter((r) => r.status === 'DRAFT').length, icon: FileText, color: 'warning' },
@@ -439,6 +441,9 @@ export default function PayrollPage() {
                     <TableRow>
                       <TableHead>Employee</TableHead>
                       <TableHead className="text-right">Monthly</TableHead>
+                      {showPreviewHours && (
+                        <TableHead className="text-right">Hours</TableHead>
+                      )}
                       <TableHead className="text-right">Bonus</TableHead>
                       <TableHead className="text-right">Gross</TableHead>
                       <TableHead className="text-right">Deductions</TableHead>
@@ -450,6 +455,11 @@ export default function PayrollPage() {
                       <TableRow key={row.employee_id}>
                         <TableCell className="font-medium">{row.name}</TableCell>
                         <TableCell className="text-right">{formatMoney(row.monthly_salary)}</TableCell>
+                        {showPreviewHours && (
+                          <TableCell className="text-right text-muted-foreground">
+                            {(row.worked_hours ?? 0).toFixed(1)} / {(row.expected_hours ?? 0).toFixed(1)}
+                          </TableCell>
+                        )}
                         <TableCell className="text-right">{formatMoney(row.bonus_total || 0)}</TableCell>
                         <TableCell className="text-right">{formatMoney(row.gross)}</TableCell>
                         <TableCell className="text-right text-destructive">{formatMoney(row.deductions_total)}</TableCell>
@@ -457,7 +467,7 @@ export default function PayrollPage() {
                       </TableRow>
                     ))}
                     <TableRow>
-                      <TableCell colSpan={2}></TableCell>
+                      <TableCell colSpan={showPreviewHours ? 3 : 2}></TableCell>
                       <TableCell className="text-right font-semibold">
                         {formatMoney(previewRows.reduce((s, r) => s + (r.bonus_total || 0), 0))}
                       </TableCell>

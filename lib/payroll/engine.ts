@@ -20,6 +20,10 @@ export interface PayrollPreviewRow {
   bonus_total: number;
   earnings: PayrollLine[];
   deductions: PayrollLine[];
+  timecard_days?: number;
+  worked_hours?: number;
+  expected_hours?: number;
+  timecard_mode?: 'DAYS' | 'HOURS';
 }
 
 export interface PayrollRunRequest {
