@@ -7,8 +7,8 @@
 --       employee override -> global default -> working days * hours per day
 --    and prorates hourly pay as worked hours / expected hours, capped at the
 --    monthly salary.
--- 3. `payroll_preview` now reuses `_payroll_calc_for`, so previews match
---    generated payslips in both DAYS and HOURS modes.
+-- 3. Live `payroll_preview` already delegates to `_payroll_calc_for`, so it
+--    automatically returns the new expected/worked hours fields.
 -- ===========================================================================
 
 INSERT INTO public.system_settings (group_name, key, value)
@@ -303,54 +303,3 @@ BEGIN
   );
 END;
 $$;
-
--- ------------------------------------------------------------
--- Preview reuses the calculation engine so it matches generated payslips.
--- Returns a JSON array (same shape as before) with the extra hours fields.
--- ------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.payroll_preview(
-  p_period_start date,
-  p_period_end date,
-  p_employee_ids uuid[] DEFAULT NULL
-)
-RETURNS jsonb
-LANGUAGE plpgsql
-STABLE
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-  v_tax_rate numeric := 0.10;
-  v_row jsonb;
-  v_emp_id uuid;
-  v_rows jsonb := '[]'::jsonb;
-BEGIN
-  IF NOT public.has_privilege('payroll.manage') AND NOT public.has_privilege('payroll.view') THEN
-    RAISE EXCEPTION 'Not authorized to preview payroll';
-  END IF;
-
-  SELECT COALESCE((value #>> '{}')::numeric, 10)/100 INTO v_tax_rate
-  FROM public.system_settings
-  WHERE group_name = 'payroll' AND key = 'tax_rate_pct'
-  LIMIT 1;
-  v_tax_rate := COALESCE(v_tax_rate, 0.10);
-
-  -- Reuse the same calculation the run generator uses so the preview always
-  -- matches the generated payslips (including HOURS mode and expected hours).
-  FOR v_emp_id IN
-    SELECT e.id
-      FROM public.employees e
-     WHERE e.employment_status IN ('ACTIVE','PROBATION')
-       AND (p_employee_ids IS NULL OR e.id = ANY(p_employee_ids))
-     ORDER BY e.first_name, e.last_name
-  LOOP
-    v_row := public._payroll_calc_for(v_emp_id, p_period_start, p_period_end, v_tax_rate);
-    v_rows := v_rows || jsonb_build_array(v_row);
-  END LOOP;
-
-  RETURN v_rows;
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION public.payroll_preview(date, date, uuid[]) TO authenticated;
-REVOKE EXECUTE ON FUNCTION public.payroll_preview(date, date, uuid[]) FROM PUBLIC;
