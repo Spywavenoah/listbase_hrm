@@ -18831,27 +18831,9 @@ CREATE OR REPLACE FUNCTION public.payroll_preview(
   p_period_end date,
   p_employee_ids uuid[] DEFAULT NULL
 )
-RETURNS TABLE (
-  employee_id uuid,
-  name text,
-  department text,
-  monthly_salary numeric,
-  working_days integer,
-  unpaid_days integer,
-  gross numeric,
-  tax numeric,
-  earnings_total numeric,
-  deductions_total numeric,
-  net numeric,
-  bonus_total numeric,
-  earnings jsonb,
-  deductions jsonb,
-  timecard_days integer,
-  worked_hours numeric,
-  expected_hours numeric,
-  timecard_mode text
-)
+RETURNS jsonb
 LANGUAGE plpgsql
+STABLE
 SECURITY DEFINER
 SET search_path = public
 AS $$
@@ -18859,6 +18841,7 @@ DECLARE
   v_tax_rate numeric := 0.10;
   v_row jsonb;
   v_emp_id uuid;
+  v_rows jsonb := '[]'::jsonb;
 BEGIN
   IF NOT public.has_privilege('payroll.manage') AND NOT public.has_privilege('payroll.view') THEN
     RAISE EXCEPTION 'Not authorized to preview payroll';
@@ -18880,28 +18863,10 @@ BEGIN
      ORDER BY e.first_name, e.last_name
   LOOP
     v_row := public._payroll_calc_for(v_emp_id, p_period_start, p_period_end, v_tax_rate);
-
-    employee_id      := (v_row->>'employee_id')::uuid;
-    name             := COALESCE(v_row->>'name', '');
-    department       := COALESCE(v_row->>'department', 'Unassigned');
-    monthly_salary   := COALESCE((v_row->>'monthly_salary')::numeric, 0);
-    working_days     := COALESCE((v_row->>'working_days')::int, 0);
-    unpaid_days      := COALESCE((v_row->>'unpaid_days')::int, 0);
-    gross            := COALESCE((v_row->>'gross')::numeric, 0);
-    tax              := COALESCE((v_row->>'tax')::numeric, 0);
-    earnings_total   := COALESCE((v_row->>'earnings_total')::numeric, 0);
-    deductions_total := COALESCE((v_row->>'deductions_total')::numeric, 0);
-    net              := COALESCE((v_row->>'net')::numeric, 0);
-    bonus_total      := COALESCE((v_row->>'bonus_total')::numeric, 0);
-    earnings         := COALESCE(v_row->'earnings', '[]'::jsonb);
-    deductions       := COALESCE(v_row->'deductions', '[]'::jsonb);
-    timecard_days    := COALESCE((v_row->>'timecard_days')::int, 0);
-    worked_hours     := COALESCE((v_row->>'worked_hours')::numeric, 0);
-    expected_hours   := COALESCE((v_row->>'expected_hours')::numeric, 0);
-    timecard_mode    := COALESCE(v_row->>'timecard_mode', 'DAYS');
-
-    RETURN NEXT;
+    v_rows := v_rows || jsonb_build_array(v_row);
   END LOOP;
+
+  RETURN v_rows;
 END;
 $$;
 
@@ -20525,26 +20490,24 @@ BEGIN
    WHERE group_name = 'payroll' AND key = 'employee_expected_hours'
    LIMIT 1;
 
-  IF v_expected_overrides IS NOT NULL THEN
-    IF jsonb_typeof(v_expected_overrides) = 'object' THEN
-      v_employee_expected_hours := COALESCE(
-        NULLIF(v_expected_overrides->>(p_employee_id::text), '')::numeric,
-        0
-      );
-    ELSIF jsonb_typeof(v_expected_overrides) = 'array' THEN
-      SELECT COALESCE(MAX(
-               COALESCE(
-                 NULLIF(o->>'expected_hours', '')::numeric,
-                 NULLIF(o->>'hours', '')::numeric,
-                 0
-               )
-             ), 0)
-        INTO v_employee_expected_hours
-        FROM jsonb_array_elements(v_expected_overrides) o
-       WHERE o->>'employee_id' = p_employee_id::text
-          OR o->>'id' = p_employee_id::text;
-    END IF;
-  END IF;
+  SELECT COALESCE(
+           CASE jsonb_typeof(v_expected_overrides)
+             WHEN 'object' THEN
+               NULLIF(v_expected_overrides->>(p_employee_id::text), '')::numeric
+             WHEN 'array' THEN (
+               SELECT MAX(COALESCE(
+                        NULLIF(o->>'expected_hours', '')::numeric,
+                        NULLIF(o->>'hours', '')::numeric,
+                        0
+                      ))
+                 FROM jsonb_array_elements(v_expected_overrides) o
+                WHERE o->>'employee_id' = p_employee_id::text
+                   OR o->>'id' = p_employee_id::text
+             )
+             ELSE NULL
+           END,
+           0)
+    INTO v_employee_expected_hours;
 
   v_working_days := (
     SELECT count(*)::int
