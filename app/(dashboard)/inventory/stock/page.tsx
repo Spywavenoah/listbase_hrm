@@ -40,7 +40,7 @@ export default function StockPage() {
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<StockItem | null>(null);
-  const [form, setForm] = useState({ bin_location: '', reorder_level: '' });
+  const [form, setForm] = useState({ bin_location: '', reorder_level: '', reserved_quantity: '' });
   const [addOpen, setAddOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const [addForm, setAddForm] = useState({ ...EMPTY_ADD });
@@ -105,18 +105,29 @@ export default function StockPage() {
 
   const openEdit = (r: StockItem) => {
     setEditing(r);
-    setForm({ bin_location: r.bin_location || '', reorder_level: String(r.reorder_level ?? '') });
+    setForm({
+      bin_location: r.bin_location || '',
+      reorder_level: String(r.reorder_level ?? ''),
+      reserved_quantity: String(r.reserved_quantity ?? 0),
+    });
     setOpen(true);
   };
 
   const save = async () => {
     if (!editing) return;
+    const reserved = form.reserved_quantity === '' ? 0 : Number(form.reserved_quantity);
+    if (!Number.isFinite(reserved) || reserved < 0) { toast.error('Reserved quantity cannot be negative'); return; }
+    if (reserved > Number(editing.quantity)) {
+      toast.error('Reserved quantity cannot exceed the quantity on hand');
+      return;
+    }
     try {
       const { error } = await supabase
         .from('inventory_stock')
         .update({
           bin_location: form.bin_location || null,
           reorder_level: form.reorder_level === '' ? null : Number(form.reorder_level),
+          reserved_quantity: reserved,
         })
         .eq('id', editing.id);
       if (error) throw error;
@@ -253,6 +264,20 @@ export default function StockPage() {
                 <Label>Reorder Level (this warehouse)</Label>
                 <Input type="number" min="0" step="0.01" value={form.reorder_level} onChange={(e) => setForm({ ...form, reorder_level: e.target.value })} placeholder="Use item default" />
               </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Reserved Quantity</Label>
+              <Input
+                type="number"
+                min="0"
+                max={Number(editing?.quantity || 0)}
+                step="0.01"
+                value={form.reserved_quantity}
+                onChange={(e) => setForm({ ...form, reserved_quantity: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">
+                Reserved stock stays on hand but is excluded from the available balance used when issuing material requests.
+              </p>
             </div>
             <p className="text-xs text-muted-foreground">
               Quantities are changed through stock movements to keep the ledger accurate.

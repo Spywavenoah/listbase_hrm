@@ -62,9 +62,108 @@ export interface MaterialRequestItem {
   item_name: string;
   uom: string | null;
   quantity_requested: number;
+  quantity_approved: number | null;
   quantity_issued: number;
   notes: string | null;
   item?: { name: string; uom: string } | null;
+}
+
+export interface InventoryReceiptItem {
+  id: string;
+  receipt_id: string;
+  item_id: string;
+  delivered_qty: number;
+  accepted_qty: number | null;
+  rejected_qty: number | null;
+  verdict: string | null;
+  outcome: string | null;
+  inspection_comment: string | null;
+  item?: { name: string; uom: string; sku: string | null } | null;
+}
+
+export interface InventoryReceipt {
+  id: string;
+  receipt_number: string;
+  warehouse_id: string;
+  supplier_name: string | null;
+  source_reference: string | null;
+  delivery_note_ref: string | null;
+  po_document_ref: string | null;
+  received_by: string | null;
+  received_date: string;
+  status: string;
+  inspection_remarks: string | null;
+  inspected_by: string | null;
+  inspected_at: string | null;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  acknowledgement_remarks: string | null;
+  created_at: string;
+  warehouse?: { name: string } | null;
+  received_by_employee?: { first_name: string | null; last_name: string | null } | null;
+  items?: InventoryReceiptItem[];
+}
+
+export const INVENTORY_RECEIPT_STATUSES = [
+  'PENDING_INSPECTION',
+  'INSPECTED',
+  'ACKNOWLEDGED',
+  'CANCELLED',
+] as const;
+
+export const RECEIPT_VERDICTS = [
+  { value: 'CONFORMING', label: 'Conforming' },
+  { value: 'DAMAGED', label: 'Damaged' },
+  { value: 'INCORRECT_SPEC', label: 'Incorrect specification' },
+  { value: 'SHORTAGE', label: 'Shortage' },
+  { value: 'EXCESS', label: 'Excess supply' },
+];
+
+export const RECEIPT_OUTCOMES = [
+  { value: 'ACCEPTED', label: 'Accepted' },
+  { value: 'ACCEPTED_WITH_COMMENT', label: 'Accepted with comment' },
+  { value: 'REJECTED', label: 'Rejected' },
+];
+
+export interface MaterialIssueReceiptItem {
+  id: string;
+  receipt_id: string;
+  request_item_id: string;
+  quantity: number;
+  request_item?: {
+    id: string;
+    item_name: string;
+    uom: string | null;
+    quantity_requested: number;
+    quantity_approved: number | null;
+    quantity_issued: number;
+  } | null;
+}
+
+export interface MaterialIssueReceipt {
+  id: string;
+  receipt_number: string;
+  request_id: string;
+  issued_by: string | null;
+  recipient_employee_id: string | null;
+  recipient_name: string;
+  issued_at: string;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  acknowledgement_method: string | null;
+  signed_document_url: string | null;
+  comment: string | null;
+  request?: { request_number: string; warehouse?: { name: string } | null } | null;
+  lines?: MaterialIssueReceiptItem[];
+}
+
+export interface MaterialIssueEvent {
+  id: string;
+  request_id: string;
+  actor_id: string | null;
+  event: string;
+  comment: string | null;
+  created_at: string;
 }
 
 export interface MaterialRequest {
@@ -86,7 +185,7 @@ export interface MaterialRequest {
   warehouse?: { name: string } | null;
 }
 
-export const MATERIAL_REQUEST_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'ISSUED', 'CANCELLED'];
+export const MATERIAL_REQUEST_STATUSES = ['PENDING', 'APPROVED', 'PARTIALLY_ISSUED', 'ISSUED', 'COMPLETED', 'REJECTED', 'CANCELLED'];
 
 export const MATERIAL_USAGE_CATEGORIES = [
   { value: 'PROJECT', label: 'Project' },

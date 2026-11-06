@@ -16,6 +16,8 @@ import {
   ArrowUpFromLine,
   CalendarClock,
   TrendingUp,
+  Truck,
+  FileCheck2,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { cn } from '@/lib/utils';
@@ -55,13 +57,19 @@ export default function InventoryDashboard() {
   const { employee } = useAccess();
   const [stock, setStock] = useState<StockLite[]>([]);
   const [movements, setMovements] = useState<MovementRow[]>([]);
-  const [counts, setCounts] = useState({ items: 0, warehouses: 0, categories: 0 });
+  const [counts, setCounts] = useState({
+    items: 0,
+    warehouses: 0,
+    categories: 0,
+    pendingReceipts: 0,
+    pendingIssueReceipts: 0,
+  });
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [st, mv, items, wh, cats] = await Promise.all([
+      const [st, mv, items, wh, cats, receipts, issues] = await Promise.all([
         supabase
           .from('inventory_stock')
           .select('item_id, warehouse_id, quantity, expiry_date, item:inventory_items(name,uom,unit_cost,reorder_level,max_stock_level,expiry_warning_days), warehouse:inventory_warehouses(name)'),
@@ -73,10 +81,18 @@ export default function InventoryDashboard() {
         supabase.from('inventory_items').select('id', { count: 'exact', head: true }),
         supabase.from('inventory_warehouses').select('id', { count: 'exact', head: true }),
         supabase.from('inventory_categories').select('id', { count: 'exact', head: true }),
+        supabase.from('inventory_receipts').select('id', { count: 'exact', head: true }).eq('status', 'PENDING_INSPECTION'),
+        supabase.from('material_issue_receipts').select('id', { count: 'exact', head: true }).is('acknowledged_at', null),
       ]);
       setStock((st.data || []) as unknown as StockLite[]);
       setMovements((mv.data || []) as unknown as MovementRow[]);
-      setCounts({ items: items.count || 0, warehouses: wh.count || 0, categories: cats.count || 0 });
+      setCounts({
+        items: items.count || 0,
+        warehouses: wh.count || 0,
+        categories: cats.count || 0,
+        pendingReceipts: receipts.count || 0,
+        pendingIssueReceipts: issues.count || 0,
+      });
     } catch (err) {
       console.error(err);
     } finally {
@@ -140,6 +156,8 @@ export default function InventoryDashboard() {
     { label: 'Over-stocked', value: totals.over.length, icon: TrendingUp, color: totals.over.length ? 'warning' : 'success', href: '/inventory/stock' },
     { label: 'Expiring Soon', value: totals.expiring.length, icon: CalendarClock, color: totals.expiring.length ? 'destructive' : 'success', href: '/inventory/expiry' },
     { label: 'Categories', value: counts.categories, icon: Tags, color: 'info', href: '/inventory/categories' },
+    { label: 'Pending Receiving', value: counts.pendingReceipts, icon: Truck, color: counts.pendingReceipts ? 'warning' : 'success', href: '/inventory/receiving' },
+    { label: 'Issue Acknowledgements', value: counts.pendingIssueReceipts, icon: FileCheck2, color: counts.pendingIssueReceipts ? 'warning' : 'success', href: '/inventory/issue-receipts' },
   ];
 
   return (

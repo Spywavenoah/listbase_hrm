@@ -114,6 +114,8 @@ const RULES: Rule[] = [
   { re: /^\/inventory\/categories/, guard: { anyPrivilege: ['inventory.manage', 'inventory.settings'] } },
   { re: /^\/inventory\/items/, guard: { anyPrivilege: ['inventory.view', 'inventory.manage'] } },
   { re: /^\/inventory\/material-requests/, guard: { anyPrivilege: ['inventory.request', 'inventory.issue', 'inventory.manage'] } },
+  { re: /^\/inventory\/receiving/, guard: { anyPrivilege: ['inventory.view', 'inventory.manage', 'inventory.move', 'inventory.issue'] } },
+  { re: /^\/inventory\/issue-receipts/, guard: { anyPrivilege: ['inventory.view', 'inventory.manage', 'inventory.issue'] } },
   { re: /^\/inventory\/expiry/, guard: { anyPrivilege: ['inventory.view', 'inventory.manage', 'inventory.move', 'inventory.issue'] } },
   { re: /^\/inventory\/stock/, guard: { anyPrivilege: ['inventory.view', 'inventory.manage', 'inventory.move', 'inventory.issue'] } },
   { re: /^\/inventory\/movements/, guard: { anyPrivilege: ['inventory.view', 'inventory.manage', 'inventory.move'] } },

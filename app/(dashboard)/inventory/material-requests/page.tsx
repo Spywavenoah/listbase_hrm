@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { ModuleListPage, type Column, type SummaryCard } from '@/components/shared/module-list-page';
-import { ClipboardList, Plus, Trash2, PackageCheck, Clock, CheckCircle, AlertTriangle } from 'lucide-react';
+import { ClipboardList, Plus, Trash2, PackageCheck, Clock, CheckCircle, AlertTriangle, FileCheck2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -21,6 +22,8 @@ import {
   fmtDate,
   fmtQty,
   type InventoryItem,
+  type MaterialIssueEvent,
+  type MaterialIssueReceipt,
   type MaterialRequest,
   type MaterialRequestItem,
 } from '@/lib/inventory';
@@ -47,7 +50,9 @@ const usageLabel = (value: string | null) =>
 const statusClass = (status: string) => {
   switch (status) {
     case 'APPROVED': return 'bg-success/10 text-success border-success/30';
+    case 'PARTIALLY_ISSUED': return 'bg-info/10 text-info border-info/30';
     case 'ISSUED': return 'bg-primary/10 text-primary border-primary/30';
+    case 'COMPLETED': return 'bg-success/10 text-success border-success/30';
     case 'REJECTED': return 'bg-destructive/10 text-destructive border-destructive/30';
     case 'CANCELLED': return 'bg-muted text-muted-foreground';
     default: return 'bg-warning/10 text-warning border-warning/30';
@@ -55,23 +60,29 @@ const statusClass = (status: string) => {
 };
 
 export default function MaterialRequestsPage() {
+  const router = useRouter();
   const { can, employee } = useAccess();
   const canRequest = can('inventory.request') || can('inventory.manage');
   const canIssue = can('inventory.issue') || can('inventory.manage');
 
   const [rows, setRows] = useState<MaterialRequest[]>([]);
   const [itemsByReq, setItemsByReq] = useState<Record<string, MaterialRequestItem[]>>({});
+  const [receiptsByReq, setReceiptsByReq] = useState<Record<string, MaterialIssueReceipt[]>>({});
+  const [eventsByReq, setEventsByReq] = useState<Record<string, MaterialIssueEvent[]>>({});
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [projects, setProjects] = useState<ProjectRef[]>([]);
-  const [stockMap, setStockMap] = useState<Record<string, number>>({});
+  const [stockMap, setStockMap] = useState<Record<string, { quantity: number; reserved: number }>>({});
   const [employeeNames, setEmployeeNames] = useState<Record<string, string>>({});
+  const [employeeIds, setEmployeeIds] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [issueTarget, setIssueTarget] = useState<MaterialRequest | null>(null);
+  const [issueQty, setIssueQty] = useState<Record<string, string>>({});
+  const [recipientId, setRecipientId] = useState('');
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [lines, setLines] = useState<Line[]>([{ item_id: '', quantity: '', notes: '' }]);
@@ -80,14 +91,16 @@ export default function MaterialRequestsPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [rRes, iRes, itemsRes, wRes, dRes, sRes, empRes] = await Promise.all([
+      const [rRes, iRes, itemsRes, wRes, dRes, sRes, empRes, receiptRes, eventRes] = await Promise.all([
         supabase.from('material_requests').select('*, warehouse:inventory_warehouses(name)').order('created_at', { ascending: false }),
         supabase.from('material_request_items').select('*'),
         supabase.from('inventory_items').select('*').eq('is_active', true).order('name'),
         supabase.from('inventory_warehouses').select('id, name, is_default').eq('is_active', true).order('name'),
         supabase.from('departments').select('id, name').eq('is_active', true).order('name'),
-        supabase.from('inventory_stock').select('item_id, warehouse_id, quantity'),
+        supabase.from('inventory_stock').select('item_id, warehouse_id, quantity, reserved_quantity'),
         supabase.rpc('get_procurement_employee_list'),
+        supabase.from('material_issue_receipts').select('*').order('issued_at', { ascending: false }),
+        supabase.from('material_issue_events').select('*').order('created_at', { ascending: false }),
       ]);
       const { data: projData } = await supabase.from('projects').select('id, code, name').order('name');
       setProjects((projData || []) as unknown as ProjectRef[]);
@@ -97,17 +110,32 @@ export default function MaterialRequestsPage() {
         (grouped[it.request_id] = grouped[it.request_id] || []).push(it);
       }
       setItemsByReq(grouped);
+      const receipts: Record<string, MaterialIssueReceipt[]> = {};
+      for (const receipt of (receiptRes.data || []) as unknown as MaterialIssueReceipt[]) {
+        (receipts[receipt.request_id] = receipts[receipt.request_id] || []).push(receipt);
+      }
+      setReceiptsByReq(receipts);
+      const events: Record<string, MaterialIssueEvent[]> = {};
+      for (const event of (eventRes.data || []) as unknown as MaterialIssueEvent[]) {
+        (events[event.request_id] = events[event.request_id] || []).push(event);
+      }
+      setEventsByReq(events);
       setItems((itemsRes.data || []) as unknown as InventoryItem[]);
       setWarehouses((wRes.data || []) as unknown as Warehouse[]);
       setDepartments((dRes.data || []) as unknown as Department[]);
-      const map: Record<string, number> = {};
-      for (const s of (sRes.data || []) as { item_id: string; warehouse_id: string; quantity: number }[]) {
-        map[`${s.item_id}:${s.warehouse_id}`] = Number(s.quantity) || 0;
+      const map: Record<string, { quantity: number; reserved: number }> = {};
+      for (const s of (sRes.data || []) as { item_id: string; warehouse_id: string; quantity: number; reserved_quantity: number }[]) {
+        map[`${s.item_id}:${s.warehouse_id}`] = {
+          quantity: Number(s.quantity) || 0,
+          reserved: Number(s.reserved_quantity) || 0,
+        };
       }
       setStockMap(map);
       const names: Record<string, string> = {};
-      for (const e of (empRes.data || []) as { id: string; name: string }[]) names[e.id] = e.name;
+      const employeeList = (empRes.data || []) as { id: string; name: string }[];
+      for (const e of employeeList) names[e.id] = e.name;
       setEmployeeNames(names);
+      setEmployeeIds(employeeList);
     } catch (err) {
       console.error(err);
     } finally {
@@ -119,7 +147,9 @@ export default function MaterialRequestsPage() {
 
   const available = (itemId: string, warehouseId: string) => {
     if (!itemId || !warehouseId) return 0;
-    return stockMap[`${itemId}:${warehouseId}`] ?? 0;
+    const stock = stockMap[`${itemId}:${warehouseId}`];
+    if (!stock) return 0;
+    return Math.max(0, stock.quantity - stock.reserved);
   };
 
   const openCreate = () => {
@@ -214,23 +244,75 @@ export default function MaterialRequestsPage() {
     }
   };
 
+  const outstanding = (line: MaterialRequestItem) =>
+    Math.max(0, Number(line.quantity_approved ?? line.quantity_requested) - Number(line.quantity_issued));
+
+  const openIssue = (row: MaterialRequest) => {
+    const defaults: Record<string, string> = {};
+    for (const line of itemsByReq[row.id] || []) {
+      const remaining = outstanding(line);
+      defaults[line.id] = remaining > 0 ? String(remaining) : '';
+    }
+    setIssueQty(defaults);
+    setRecipientId(row.requested_by || '');
+    setIssueTarget(row);
+  };
+
   const issue = async (row: MaterialRequest) => {
+    const lines = itemsByReq[row.id] || [];
+    const payload = lines
+      .map((line) => ({ request_item_id: line.id, quantity: Number(issueQty[line.id] || 0) }))
+      .filter((line) => line.quantity > 0);
+
+    if (payload.length === 0) { toast.error('Enter at least one issue quantity'); return; }
+
+    for (const line of lines) {
+      const qty = Number(issueQty[line.id] || 0);
+      if (qty <= 0) continue;
+      const remaining = outstanding(line);
+      if (qty > remaining) {
+        toast.error(`${line.item_name}: only ${fmtQty(remaining)} outstanding`);
+        return;
+      }
+      if (row.warehouse_id) {
+        const stock = available(line.item_id, row.warehouse_id);
+        if (qty > stock) {
+          toast.error(`${line.item_name}: only ${fmtQty(stock)} available (reserved stock excluded)`);
+          return;
+        }
+      }
+    }
+
+    setSaving(true);
     try {
-      const { data, error } = await supabase.rpc('issue_material_request', { p_request_id: row.id });
+      const { data, error } = await supabase.rpc('issue_material_request_partial', {
+        p_request_id: row.id,
+        p_lines: payload,
+        p_recipient_employee_id: recipientId || null,
+        p_recipient_name: employeeNames[recipientId] || null,
+      });
       if (error) throw error;
-      toast.success(`Issued ${Number(data) || 0} line(s); stock deducted`);
+      toast.success('Materials issued — issue receipt created for acknowledgement');
       setIssueTarget(null);
-      load();
+      await load();
+      if (data) setDetailId(row.id);
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
+    } finally {
+      setSaving(false);
     }
   };
+
+  const unacknowledged = Object.values(receiptsByReq)
+    .flat()
+    .filter((receipt) => !receipt.acknowledged_at).length;
 
   const summaryCards: SummaryCard[] = [
     { label: 'Requests', value: rows.length, icon: ClipboardList, color: 'primary' },
     { label: 'Pending', value: rows.filter((r) => r.status === 'PENDING').length, icon: Clock, color: 'warning' },
-    { label: 'Approved', value: rows.filter((r) => r.status === 'APPROVED').length, icon: CheckCircle, color: 'success' },
-    { label: 'Issued', value: rows.filter((r) => r.status === 'ISSUED').length, icon: PackageCheck, color: 'info' },
+    { label: 'Approved', value: rows.filter((r) => r.status === 'APPROVED' || r.status === 'PARTIALLY_ISSUED').length, icon: CheckCircle, color: 'success' },
+    { label: 'Issued', value: rows.filter((r) => r.status === 'ISSUED' || r.status === 'COMPLETED').length, icon: PackageCheck, color: 'info' },
+    { label: 'Awaiting Ack.', value: unacknowledged, icon: FileCheck2, color: unacknowledged ? 'warning' : 'success' },
   ];
 
   const lineCount = (id: string) => (itemsByReq[id] || []).length;
@@ -281,8 +363,8 @@ export default function MaterialRequestsPage() {
         onCreate={canRequest ? openCreate : undefined}
         onRowClick={(r) => setDetailId(r.id)}
         rowActions={(r) => (
-          canIssue && r.status === 'APPROVED'
-            ? <Button size="sm" variant="outline" onClick={() => setIssueTarget(r)}><PackageCheck className="mr-1.5 h-4 w-4" /> Issue</Button>
+          canIssue && (r.status === 'APPROVED' || r.status === 'PARTIALLY_ISSUED')
+            ? <Button size="sm" variant="outline" onClick={() => openIssue(r)}><PackageCheck className="mr-1.5 h-4 w-4" /> Issue</Button>
             : null
         )}
         emptyMessage="No material requests yet"
@@ -439,18 +521,67 @@ export default function MaterialRequestsPage() {
                 {detailRow.purpose && <p>Purpose: <span className="font-medium">{detailRow.purpose}</span></p>}
                 {detailRow.issued_at && <p>Issued: <span className="font-medium">{fmtDate(detailRow.issued_at)}</span></p>}
               </div>
-              {(itemsByReq[detailRow.id] || []).map((line) => (
-                <div key={line.id} className="flex items-center justify-between rounded-lg border border-border p-3 text-sm">
-                  <span className="font-medium">{line.item_name}</span>
-                  <span>{fmtQty(line.quantity_requested)} {line.uom || ''}{line.quantity_issued > 0 ? ` · issued ${fmtQty(line.quantity_issued)}` : ''}</span>
+              {(itemsByReq[detailRow.id] || []).map((line) => {
+                const approved = Number(line.quantity_approved ?? line.quantity_requested);
+                const remaining = outstanding(line);
+                return (
+                  <div key={line.id} className="rounded-lg border border-border p-3 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">{line.item_name}</span>
+                      <span className="text-xs text-muted-foreground">{line.uom || ''}</span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <span>Requested {fmtQty(line.quantity_requested)}</span>
+                      <span>Approved {fmtQty(approved)}</span>
+                      <span>Issued {fmtQty(line.quantity_issued)}</span>
+                      <span className={remaining > 0 ? 'text-warning' : 'text-success'}>Outstanding {fmtQty(remaining)}</span>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {(receiptsByReq[detailRow.id] || []).length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium">Issue receipts</p>
+                    <Button variant="ghost" size="sm" onClick={() => router.push('/inventory/issue-receipts')}>
+                      View all <FileCheck2 className="ml-1.5 h-4 w-4" />
+                    </Button>
+                  </div>
+                  {(receiptsByReq[detailRow.id] || []).map((receipt) => (
+                    <div key={receipt.id} className="flex items-center justify-between gap-2 rounded-lg border border-border p-2.5 text-sm">
+                      <div>
+                        <p className="font-medium">{receipt.receipt_number}</p>
+                        <p className="text-xs text-muted-foreground">{receipt.recipient_name} · {fmtDate(receipt.issued_at)}</p>
+                      </div>
+                      <Badge variant="outline" className={receipt.acknowledged_at ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'}>
+                        {receipt.acknowledged_at ? 'Acknowledged' : 'Pending acknowledgement'}
+                      </Badge>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
+
+              {(eventsByReq[detailRow.id] || []).length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-sm font-medium">History</p>
+                  {(eventsByReq[detailRow.id] || []).slice(0, 6).map((event) => (
+                    <div key={event.id} className="flex items-start justify-between gap-2 text-xs">
+                      <div>
+                        <span className="font-medium">{event.event}</span>
+                        {event.comment && <span className="text-muted-foreground"> · {event.comment}</span>}
+                      </div>
+                      <span className="shrink-0 text-muted-foreground">{fmtDate(event.created_at)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {detailRow.notes && <p className="text-sm text-muted-foreground">{detailRow.notes}</p>}
             </div>
           )}
           <DialogFooter>
-            {detailRow && canIssue && detailRow.status === 'APPROVED' && (
-              <Button onClick={() => { const r = detailRow; setDetailId(null); setIssueTarget(r); }}>
+            {detailRow && canIssue && (detailRow.status === 'APPROVED' || detailRow.status === 'PARTIALLY_ISSUED') && (
+              <Button onClick={() => { const r = detailRow; setDetailId(null); openIssue(r); }}>
                 <PackageCheck className="mr-1.5 h-4 w-4" /> Issue items
               </Button>
             )}
@@ -460,14 +591,56 @@ export default function MaterialRequestsPage() {
       </Dialog>
 
       <Dialog open={!!issueTarget} onOpenChange={(o) => !o && setIssueTarget(null)}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Issue material request</DialogTitle></DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            This will release the requested items and deduct them from stock for <span className="font-medium">{issueTarget?.request_number}</span>. This cannot be undone.
-          </p>
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+          <DialogHeader><DialogTitle>Issue materials · {issueTarget?.request_number}</DialogTitle></DialogHeader>
+          {issueTarget && (
+            <div className="space-y-4 py-2">
+              <p className="text-sm text-muted-foreground">
+                Enter the quantity released now. Stock is deducted immediately and an issue receipt is created for acknowledgement.
+                Partial issues are supported; the request stays open until all approved quantities are issued.
+              </p>
+              <div className="space-y-1.5">
+                <Label>Recipient</Label>
+                <Select value={recipientId || '__none__'} onValueChange={(v) => setRecipientId(v === '__none__' ? '' : v)}>
+                  <SelectTrigger><SelectValue placeholder="Select recipient" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">Not recorded</SelectItem>
+                    {employeeIds.map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                {(itemsByReq[issueTarget.id] || []).map((line) => {
+                  const remaining = outstanding(line);
+                  const avail = available(line.item_id, issueTarget.warehouse_id || '');
+                  return (
+                    <div key={line.id} className="space-y-2 rounded-lg border border-border p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                        <span className="font-medium">{line.item_name}</span>
+                        <span className="text-xs text-muted-foreground">
+                          Outstanding {fmtQty(remaining)} {line.uom || ''} · Available {fmtQty(avail)}
+                        </span>
+                      </div>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={remaining}
+                        step="0.01"
+                        value={issueQty[line.id] ?? ''}
+                        disabled={remaining <= 0}
+                        onChange={(e) => setIssueQty({ ...issueQty, [line.id]: e.target.value })}
+                        placeholder={remaining > 0 ? `Up to ${fmtQty(remaining)}` : 'Fully issued'}
+                      />
+                      {remaining <= 0 && <p className="text-xs text-success">This line is fully issued.</p>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setIssueTarget(null)}>Cancel</Button>
-            <Button onClick={() => issueTarget && issue(issueTarget)}>Issue &amp; deduct stock</Button>
+            <Button onClick={() => issueTarget && issue(issueTarget)} disabled={saving}>Issue &amp; deduct stock</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
