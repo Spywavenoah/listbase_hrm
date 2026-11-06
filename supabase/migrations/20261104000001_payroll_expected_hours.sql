@@ -2,13 +2,14 @@
 -- Payroll expected hours for hourly calculation
 --
 -- 1. Adds a global default expected-hours setting and per-employee overrides
---    (JSONB, so no table/column changes are required).
--- 2. `_payroll_calc_for` resolves expected hours as:
---       employee override -> global default -> working days * hours per day
---    and prorates hourly pay as worked hours / expected hours, capped at the
+--    (stored as JSONB in system_settings, so no table/column changes).
+-- 2. Replaces `_payroll_calc_for`, preserving the live engine (editable
+--    statutory rates from the system pay components) and resolving expected
+--    hours as: employee override -> global default -> working days * hours.
+--    Hourly pay is prorated by worked hours / expected hours, capped at the
 --    monthly salary.
--- 3. Live `payroll_preview` already delegates to `_payroll_calc_for`, so it
---    automatically returns the new expected/worked hours fields.
+-- 3. Returns expected_hours / default_expected_hours / employee_expected_hours
+--    so payroll preview and payslips can show worked vs expected hours.
 -- ===========================================================================
 
 INSERT INTO public.system_settings (group_name, key, value)
@@ -63,6 +64,10 @@ DECLARE
   v_employee_expected_hours numeric := 0;
   v_expected_overrides jsonb;
   v_basic numeric := 0;
+  v_pen_emp_rate numeric := 8;
+  v_pen_er_rate numeric := 10;
+  v_nsitf_rate numeric := 1;
+  v_tax_override numeric := NULL;
 BEGIN
   SELECT COALESCE(NULLIF(e.annual_salary, 0) / 12, e.monthly_salary, 0),
          COALESCE(e.first_name || ' ' || e.last_name, ''),
@@ -117,6 +122,16 @@ BEGIN
            END,
            0)
     INTO v_employee_expected_hours;
+
+  -- Editable statutory rates come from the locked system pay components
+  SELECT
+    COALESCE(MAX(CASE WHEN system_key = 'PENSION_EMP' THEN CASE WHEN is_active THEN COALESCE(amount, 8) ELSE 0 END END), 8),
+    COALESCE(MAX(CASE WHEN system_key = 'PENSION_ER'  THEN CASE WHEN is_active THEN COALESCE(amount, 10) ELSE 0 END END), 10),
+    COALESCE(MAX(CASE WHEN system_key = 'NSITF'       THEN CASE WHEN is_active THEN COALESCE(amount, 1) ELSE 0 END END), 1),
+    MAX(CASE WHEN system_key = 'TAX_PAYE' AND is_active AND calculation_type = 'PERCENTAGE' THEN amount END)
+    INTO v_pen_emp_rate, v_pen_er_rate, v_nsitf_rate, v_tax_override
+    FROM public.pay_components
+   WHERE is_system;
 
   v_working_days := (
     SELECT count(*)::int
@@ -242,30 +257,34 @@ BEGIN
 
   -- Statutory: Pension (employee deduction + employer contribution)
   IF v_pension_enabled THEN
-    v_amt := round(v_basic * 0.08, 2);
+    v_amt := round(v_basic * COALESCE(v_pen_emp_rate, 0) / 100, 2);
     IF v_amt > 0 THEN
-      v_deductions := v_deductions || jsonb_build_array(jsonb_build_object('name', 'Pension — Employee (8%)', 'amount', v_amt));
+      v_deductions := v_deductions || jsonb_build_array(jsonb_build_object('name', 'Pension — Employee', 'amount', v_amt));
       v_deductions_total := v_deductions_total + v_amt;
     END IF;
-    v_amt := round(v_basic * 0.10, 2);
+    v_amt := round(v_basic * COALESCE(v_pen_er_rate, 0) / 100, 2);
     IF v_amt > 0 THEN
-      v_employer := v_employer || jsonb_build_array(jsonb_build_object('name', 'Pension — Employer (10%)', 'amount', v_amt));
+      v_employer := v_employer || jsonb_build_array(jsonb_build_object('name', 'Pension — Employer', 'amount', v_amt));
       v_employer_total := v_employer_total + v_amt;
     END IF;
   END IF;
 
   -- Statutory: NSITF (employer contribution, not deducted from employee)
   IF v_nsitf_enabled THEN
-    v_amt := round(v_gross * 0.01, 2);
+    v_amt := round(v_gross * COALESCE(v_nsitf_rate, 0) / 100, 2);
     IF v_amt > 0 THEN
-      v_employer := v_employer || jsonb_build_array(jsonb_build_object('name', 'NSITF — Employer (1%)', 'amount', v_amt));
+      v_employer := v_employer || jsonb_build_array(jsonb_build_object('name', 'NSITF — Employer', 'amount', v_amt));
       v_employer_total := v_employer_total + v_amt;
     END IF;
   END IF;
 
-  -- Statutory: PAYE
+  -- Statutory: PAYE (percent override when configured, otherwise Nigerian bands)
   IF v_tax_enabled AND v_gross > 0 THEN
-    v_tax := public._ng_paye_monthly(v_gross * 12);
+    IF v_tax_override IS NOT NULL THEN
+      v_tax := round(v_gross * v_tax_override / 100, 2);
+    ELSE
+      v_tax := public._ng_paye_monthly(v_gross * 12);
+    END IF;
     IF v_tax > 0 THEN
       v_deductions := v_deductions || jsonb_build_array(jsonb_build_object('name', 'PAYE Tax', 'amount', v_tax));
       v_deductions_total := v_deductions_total + v_tax;
