@@ -260,7 +260,10 @@ export default function InventoryItemsPage() {
           <button
             type="button"
             className="text-left text-xs text-primary hover:underline"
-            onClick={(e) => { e.stopPropagation(); router.push('/inventory/receiving'); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              router.push(entry.receiptId ? `/inventory/receiving?receipt=${entry.receiptId}` : '/inventory/receiving');
+            }}
           >
             <span className="font-medium">{fmtQty(entry.qty)} {i.uom}</span>
             <span className="block text-muted-foreground">{pendingStatus(entry)}</span>
