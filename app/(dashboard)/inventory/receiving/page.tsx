@@ -1,15 +1,17 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ModuleListPage, type Column, type SummaryCard } from '@/components/shared/module-list-page';
 import {
   ClipboardCheck,
   Clock,
+  FileText,
   PackageCheck,
   Plus,
   ShieldCheck,
   Trash2,
   Truck,
+  Upload,
   AlertTriangle,
 } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
@@ -23,10 +25,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from 'sonner';
 import { useAccess } from '@/lib/access';
 import {
+  INVENTORY_DOCUMENT_ACCEPT,
+  INVENTORY_DOCUMENT_BUCKET,
   RECEIPT_OUTCOMES,
   RECEIPT_VERDICTS,
   fmtDate,
   fmtQty,
+  inventoryDocumentError,
+  inventoryDocumentPath,
   type InventoryItem,
   type InventoryReceipt,
   type InventoryReceiptItem,
@@ -86,13 +92,20 @@ export default function GoodsReceivingPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [lines, setLines] = useState<Line[]>([{ item_id: '', quantity: '' }]);
+  const [waybillFile, setWaybillFile] = useState<File | null>(null);
+  const [poFile, setPoFile] = useState<File | null>(null);
+  const [mriFile, setMriFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
+  const waybillRef = useRef<HTMLInputElement>(null);
+  const poFileRef = useRef<HTMLInputElement>(null);
+  const mriFileRef = useRef<HTMLInputElement>(null);
 
   const [detailId, setDetailId] = useState<string | null>(null);
   const [inspection, setInspection] = useState<Record<string, InspectionRow>>({});
   const [inspectionRemarks, setInspectionRemarks] = useState('');
   const [ackRemarks, setAckRemarks] = useState('');
   const [working, setWorking] = useState(false);
+  const initialReceiptHandled = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -125,10 +138,39 @@ export default function GoodsReceivingPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  // Deep link from an item's receiving history: /inventory/receiving?receipt=<id>
+  useEffect(() => {
+    if (typeof window === 'undefined' || initialReceiptHandled.current) return;
+    const id = new URLSearchParams(window.location.search).get('receipt');
+    if (id && rows.some((row) => row.id === id)) {
+      initialReceiptHandled.current = true;
+      setDetailId(id);
+    }
+  }, [rows]);
+
+  const attachmentError = (file: File | null) => (file ? inventoryDocumentError(file) : null);
+
+  const uploadDocument = async (receiptId: string, kind: 'WAYBILL' | 'PO' | 'MRI', file: File) => {
+    const path = inventoryDocumentPath('receiving', receiptId, file);
+    const { error: uploadError } = await supabase.storage
+      .from(INVENTORY_DOCUMENT_BUCKET)
+      .upload(path, file, { upsert: true, contentType: file.type });
+    if (uploadError) throw uploadError;
+    const { data } = supabase.storage.from(INVENTORY_DOCUMENT_BUCKET).getPublicUrl(path);
+    const { error: attachError } = await supabase.rpc('attach_inventory_receipt_document', {
+      p_receipt_id: receiptId,
+      p_kind: kind,
+      p_url: data.publicUrl,
+    });
+    if (attachError) throw attachError;
+  };
+
   const openCreate = () => {
     const def = warehouses.find((w) => w.is_default)?.id || warehouses[0]?.id || '';
     setForm({ ...EMPTY_FORM, warehouse_id: def });
     setLines([{ item_id: '', quantity: '' }]);
+    setWaybillFile(null);
+    setPoFile(null);
     setCreateOpen(true);
   };
 
@@ -143,6 +185,8 @@ export default function GoodsReceivingPage() {
       if (seen.has(l.item_id)) { toast.error('An item may appear only once on a receipt'); return; }
       seen.add(l.item_id);
     }
+    const fileError = attachmentError(waybillFile) || attachmentError(poFile);
+    if (fileError) { toast.error(fileError); return; }
     setSaving(true);
     try {
       const { data, error } = await supabase.rpc('create_inventory_receipt', {
@@ -154,9 +198,18 @@ export default function GoodsReceivingPage() {
       });
       if (error) throw error;
       toast.success('Goods receipt registered — inspection required');
+      const receiptId = data ? String(data) : null;
+      if (receiptId) {
+        try {
+          if (waybillFile) await uploadDocument(receiptId, 'WAYBILL', waybillFile);
+          if (poFile) await uploadDocument(receiptId, 'PO', poFile);
+        } catch (docErr) {
+          toast.error('Receipt saved, but a document could not be attached: ' + (docErr as Error).message);
+        }
+      }
       setCreateOpen(false);
       await load();
-      if (data) setDetailId(String(data));
+      if (receiptId) setDetailId(receiptId);
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
     } finally {
@@ -184,6 +237,7 @@ export default function GoodsReceivingPage() {
     setInspection(next);
     setInspectionRemarks(detailRow.inspection_remarks || '');
     setAckRemarks(detailRow.acknowledgement_remarks || '');
+    setMriFile(null);
   }, [detailRow?.id, detailLines.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submitInspection = async () => {
@@ -227,7 +281,15 @@ export default function GoodsReceivingPage() {
         p_remarks: inspectionRemarks || null,
       });
       if (error) throw error;
+      if (mriFile) {
+        try {
+          await uploadDocument(detailRow.id, 'MRI', mriFile);
+        } catch (docErr) {
+          toast.error('Inspection saved, but the MRI report could not be attached: ' + (docErr as Error).message);
+        }
+      }
       toast.success('Inspection recorded — ready for acknowledgement');
+      setMriFile(null);
       await load();
     } catch (err) {
       toast.error('Failed: ' + (err as Error).message);
@@ -334,6 +396,38 @@ export default function GoodsReceivingPage() {
               </div>
             </div>
 
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>Waybill / delivery note</Label>
+                <input
+                  ref={waybillRef}
+                  type="file"
+                  accept={INVENTORY_DOCUMENT_ACCEPT}
+                  className="hidden"
+                  onChange={(e) => setWaybillFile(e.target.files?.[0] || null)}
+                />
+                <Button type="button" variant="outline" className="w-full justify-start" onClick={() => waybillRef.current?.click()}>
+                  <Upload className="mr-1.5 h-4 w-4" /> {waybillFile ? waybillFile.name : 'Choose waybill'}
+                </Button>
+              </div>
+              <div className="space-y-1.5">
+                <Label>PO document</Label>
+                <input
+                  ref={poFileRef}
+                  type="file"
+                  accept={INVENTORY_DOCUMENT_ACCEPT}
+                  className="hidden"
+                  onChange={(e) => setPoFile(e.target.files?.[0] || null)}
+                />
+                <Button type="button" variant="outline" className="w-full justify-start" onClick={() => poFileRef.current?.click()}>
+                  <Upload className="mr-1.5 h-4 w-4" /> {poFile ? poFile.name : 'Choose PO attachment'}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground sm:col-span-2">
+                PDF, image, Excel, CSV or Word document up to 20 MB. Documents stay attached to the goods receipt.
+              </p>
+            </div>
+
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label>Delivered items</Label>
@@ -399,6 +493,26 @@ export default function GoodsReceivingPage() {
                 {detailRow.inspected_at && <p>Inspected: <span className="font-medium">{fmtDate(detailRow.inspected_at)}</span></p>}
                 {detailRow.acknowledged_at && <p>Acknowledged: <span className="font-medium">{fmtDate(detailRow.acknowledged_at)}</span></p>}
               </div>
+
+              {(detailRow.delivery_note_url || detailRow.po_document_url || detailRow.mri_document_url) && (
+                <div className="flex flex-wrap gap-3 rounded-lg border border-border bg-muted/30 p-3 text-sm">
+                  {detailRow.delivery_note_url && (
+                    <a className="flex items-center gap-1.5 text-primary underline" href={detailRow.delivery_note_url} target="_blank" rel="noreferrer">
+                      <FileText className="h-4 w-4" /> Waybill
+                    </a>
+                  )}
+                  {detailRow.po_document_url && (
+                    <a className="flex items-center gap-1.5 text-primary underline" href={detailRow.po_document_url} target="_blank" rel="noreferrer">
+                      <FileText className="h-4 w-4" /> PO document
+                    </a>
+                  )}
+                  {detailRow.mri_document_url && (
+                    <a className="flex items-center gap-1.5 text-primary underline" href={detailRow.mri_document_url} target="_blank" rel="noreferrer">
+                      <FileText className="h-4 w-4" /> MRI report
+                    </a>
+                  )}
+                </div>
+              )}
 
               <div className="overflow-x-auto rounded-lg border border-border">
                 <table className="w-full text-sm">
@@ -473,12 +587,28 @@ export default function GoodsReceivingPage() {
               </div>
 
               {detailEditable && (
-                <div className="space-y-1.5">
-                  <Label>Inspection remarks</Label>
-                  <Textarea rows={2} value={inspectionRemarks} onChange={(e) => setInspectionRemarks(e.target.value)} placeholder="Optional notes about the inspection (MRI reference, discrepancies, etc.)" />
-                  <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <AlertTriangle className="h-3.5 w-3.5" /> Every line must be inspected before acknowledgement.
-                  </p>
+                <div className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label>MRI / inspection report</Label>
+                    <input
+                      ref={mriFileRef}
+                      type="file"
+                      accept={INVENTORY_DOCUMENT_ACCEPT}
+                      className="hidden"
+                      onChange={(e) => setMriFile(e.target.files?.[0] || null)}
+                    />
+                    <Button type="button" variant="outline" className="w-full justify-start sm:w-auto" onClick={() => mriFileRef.current?.click()}>
+                      <Upload className="mr-1.5 h-4 w-4" /> {mriFile ? mriFile.name : 'Attach MRI report'}
+                    </Button>
+                    <p className="text-xs text-muted-foreground">Optional. Upload the inspection report before completing the inspection.</p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Inspection remarks</Label>
+                    <Textarea rows={2} value={inspectionRemarks} onChange={(e) => setInspectionRemarks(e.target.value)} placeholder="Optional notes about the inspection (MRI reference, discrepancies, etc.)" />
+                    <p className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <AlertTriangle className="h-3.5 w-3.5" /> Every line must be inspected before acknowledgement.
+                    </p>
+                  </div>
                 </div>
               )}
 

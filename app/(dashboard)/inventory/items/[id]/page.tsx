@@ -9,8 +9,39 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Barcode, PrintBarcodeButton } from '@/components/inventory/barcode';
-import { ArrowLeft, ImagePlus, AlertTriangle, Package } from 'lucide-react';
-import { fmtDate, fmtMoney, fmtQty, movementLabel, movementSign, type InventoryItem, type Movement, type StockRow } from '@/lib/inventory';
+import { ArrowLeft, ImagePlus, AlertTriangle, Package, FileText } from 'lucide-react';
+import { fmtDate, fmtMoney, fmtQty, movementLabel, movementSign, RECEIPT_OUTCOMES, RECEIPT_VERDICTS, type InventoryItem, type Movement, type StockRow } from '@/lib/inventory';
+
+interface ReceivingHistoryRow {
+  id: string;
+  delivered_qty: number;
+  accepted_qty: number | null;
+  rejected_qty: number | null;
+  verdict: string | null;
+  outcome: string | null;
+  inspection_comment: string | null;
+  receipt?: {
+    id: string;
+    receipt_number: string;
+    status: string;
+    received_date: string;
+    supplier_name: string | null;
+    delivery_note_url: string | null;
+    po_document_url: string | null;
+    mri_document_url: string | null;
+    warehouse?: { name: string } | null;
+  } | null;
+}
+
+const receiptStatusLabel = (status: string) => {
+  switch (status) {
+    case 'PENDING_INSPECTION': return 'Pending inspection';
+    case 'INSPECTED': return 'Inspected';
+    case 'ACKNOWLEDGED': return 'Acknowledged';
+    case 'CANCELLED': return 'Cancelled';
+    default: return status.charAt(0) + status.slice(1).toLowerCase();
+  }
+};
 
 export default function InventoryItemDetailPage() {
   const params = useParams<{ id: string }>();
@@ -19,6 +50,7 @@ export default function InventoryItemDetailPage() {
   const [item, setItem] = useState<InventoryItem | null>(null);
   const [stock, setStock] = useState<StockRow[]>([]);
   const [movements, setMovements] = useState<Movement[]>([]);
+  const [receivingHistory, setReceivingHistory] = useState<ReceivingHistoryRow[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
 
@@ -26,15 +58,21 @@ export default function InventoryItemDetailPage() {
     if (!itemId) return;
     setLoading(true);
     try {
-      const [iRes, sRes, mRes, empRes] = await Promise.all([
+      const [iRes, sRes, mRes, empRes, rhRes] = await Promise.all([
         supabase.from('inventory_items').select('*, category:inventory_categories(name)').eq('id', itemId).single(),
         supabase.from('inventory_stock').select('*, warehouse:inventory_warehouses(name)').eq('item_id', itemId).order('quantity', { ascending: false }),
         supabase.from('inventory_movements').select('*, warehouse:inventory_warehouses!inventory_movements_warehouse_id_fkey(name)').eq('item_id', itemId).order('created_at', { ascending: false }).limit(50),
         supabase.rpc('get_procurement_employee_list'),
+        supabase
+          .from('inventory_receipt_items')
+          .select('id, delivered_qty, accepted_qty, rejected_qty, verdict, outcome, inspection_comment, receipt:inventory_receipts!inventory_receipt_items_receipt_id_fkey(id, receipt_number, status, received_date, supplier_name, delivery_note_url, po_document_url, mri_document_url, warehouse:inventory_warehouses(name))')
+          .eq('item_id', itemId)
+          .order('created_at', { ascending: false }),
       ]);
       setItem((iRes.data || null) as unknown as InventoryItem | null);
       setStock((sRes.data || []) as unknown as StockRow[]);
       setMovements((mRes.data || []) as unknown as Movement[]);
+      setReceivingHistory((rhRes.data || []) as unknown as ReceivingHistoryRow[]);
       const map: Record<string, string> = {};
       for (const e of (empRes.data || []) as { id: string; name: string }[]) map[e.id] = e.name;
       setNames(map);
@@ -187,6 +225,82 @@ export default function InventoryItemDetailPage() {
                   <TableCell>{fmtQty(r.quantity)}</TableCell>
                   <TableCell>{fmtQty(r.reserved_quantity)}</TableCell>
                   <TableCell>{fmtDate(r.expiry_date)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">Receiving history</CardTitle></CardHeader>
+        <CardContent className="p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Received</TableHead>
+                <TableHead>GRN / warehouse</TableHead>
+                <TableHead>Delivered</TableHead>
+                <TableHead>Accepted / rejected</TableHead>
+                <TableHead>Inspection</TableHead>
+                <TableHead>Documents</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {receivingHistory.length === 0 && (
+                <TableRow><TableCell colSpan={6} className="text-center text-sm text-muted-foreground">No receiving record for this item.</TableCell></TableRow>
+              )}
+              {receivingHistory.map((row) => (
+                <TableRow key={row.id} className="align-top">
+                  <TableCell>{fmtDate(row.receipt?.received_date)}</TableCell>
+                  <TableCell>
+                    {row.receipt ? (
+                      <button
+                        type="button"
+                        className="font-medium text-primary hover:underline"
+                        onClick={() => router.push(`/inventory/receiving?receipt=${row.receipt?.id}`)}
+                      >
+                        {row.receipt.receipt_number}
+                      </button>
+                    ) : (
+                      <p className="font-medium">—</p>
+                    )}
+                    <p className="text-xs text-muted-foreground">{row.receipt?.warehouse?.name || '—'}</p>
+                    {row.receipt?.supplier_name && <p className="text-xs text-muted-foreground">{row.receipt.supplier_name}</p>}
+                  </TableCell>
+                  <TableCell>{fmtQty(row.delivered_qty)} {item.uom}</TableCell>
+                  <TableCell>
+                    {row.accepted_qty != null
+                      ? <>{fmtQty(row.accepted_qty)} / {fmtQty(row.rejected_qty)}</>
+                      : <span className="text-xs text-muted-foreground">{receiptStatusLabel(row.receipt?.status || '')}</span>}
+                    {row.outcome && (
+                      <p className="text-xs text-muted-foreground">
+                        {RECEIPT_OUTCOMES.find((o) => o.value === row.outcome)?.label || row.outcome}
+                      </p>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {row.verdict
+                      ? <Badge variant="outline">{RECEIPT_VERDICTS.find((v) => v.value === row.verdict)?.label || row.verdict}</Badge>
+                      : <span className="text-xs text-muted-foreground">Awaiting inspection</span>}
+                    {row.inspection_comment && <p className="mt-1 text-xs text-muted-foreground">{row.inspection_comment}</p>}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex flex-col gap-1 text-xs">
+                      {row.receipt?.delivery_note_url && (
+                        <a className="flex items-center gap-1 text-primary underline" href={row.receipt.delivery_note_url} target="_blank" rel="noreferrer"><FileText className="h-3 w-3" /> Waybill</a>
+                      )}
+                      {row.receipt?.po_document_url && (
+                        <a className="flex items-center gap-1 text-primary underline" href={row.receipt.po_document_url} target="_blank" rel="noreferrer"><FileText className="h-3 w-3" /> PO document</a>
+                      )}
+                      {row.receipt?.mri_document_url && (
+                        <a className="flex items-center gap-1 text-primary underline" href={row.receipt.mri_document_url} target="_blank" rel="noreferrer"><FileText className="h-3 w-3" /> MRI report</a>
+                      )}
+                      {!row.receipt?.delivery_note_url && !row.receipt?.po_document_url && !row.receipt?.mri_document_url && (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </div>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

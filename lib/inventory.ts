@@ -89,6 +89,9 @@ export interface InventoryReceipt {
   source_reference: string | null;
   delivery_note_ref: string | null;
   po_document_ref: string | null;
+  delivery_note_url: string | null;
+  po_document_url: string | null;
+  mri_document_url: string | null;
   received_by: string | null;
   received_date: string;
   status: string;
@@ -153,6 +156,8 @@ export interface MaterialIssueReceipt {
   acknowledgement_method: string | null;
   signed_document_url: string | null;
   comment: string | null;
+  issued_by_employee?: { first_name: string | null; last_name: string | null } | null;
+  acknowledged_by_employee?: { first_name: string | null; last_name: string | null } | null;
   request?: { request_number: string; warehouse?: { name: string } | null } | null;
   lines?: MaterialIssueReceiptItem[];
 }
@@ -259,3 +264,29 @@ export const fmtMoney = (n: number | null | undefined) =>
 
 export const fmtDate = (d: string | null | undefined) =>
   d ? new Date(d).toLocaleDateString() : '—';
+
+export const INVENTORY_DOCUMENT_BUCKET = 'inventory-documents';
+
+export const INVENTORY_DOCUMENT_ACCEPT = '.pdf,.png,.jpg,.jpeg,.xlsx,.csv,.docx';
+
+export const INVENTORY_DOCUMENT_MAX_BYTES = 20 * 1024 * 1024;
+
+const INVENTORY_DOCUMENT_EXTENSIONS = ['pdf', 'png', 'jpg', 'jpeg', 'xlsx', 'csv', 'docx'];
+
+/** Returns an error message when a receiving/issue document is not supported. */
+export function inventoryDocumentError(file: File): string | null {
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  if (!INVENTORY_DOCUMENT_EXTENSIONS.includes(ext)) {
+    return 'Use a PDF, image, Excel, CSV or Word document.';
+  }
+  if (file.size > INVENTORY_DOCUMENT_MAX_BYTES) {
+    return 'Documents must be 20 MB or smaller.';
+  }
+  return null;
+}
+
+/** Safe storage path for a document attached to an inventory record. */
+export function inventoryDocumentPath(folder: string, id: string, file: File): string {
+  const ext = (file.name.split('.').pop() || 'pdf').toLowerCase();
+  return `${folder}/${id}/${Date.now()}.${ext}`;
+}

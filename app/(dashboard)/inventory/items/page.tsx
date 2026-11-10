@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ModuleListPage, type Column, type SummaryCard } from '@/components/shared/module-list-page';
-import { Package, CheckCircle, XCircle, DollarSign, ImagePlus, X } from 'lucide-react';
+import { Package, CheckCircle, XCircle, ImagePlus, X } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -36,12 +36,26 @@ const EMPTY = {
   is_active: true,
 };
 
+interface PendingReceiving {
+  qty: number;
+  stages: Set<string>;
+  receiptId: string | null;
+}
+
+const pendingStatus = (pending: PendingReceiving) => {
+  if (pending.stages.has('PENDING_INSPECTION') && pending.stages.has('INSPECTED')) return 'Pending receiving';
+  if (pending.stages.has('PENDING_INSPECTION')) return 'Awaiting inspection';
+  if (pending.stages.has('INSPECTED')) return 'Awaiting acknowledgement';
+  return 'Pending receiving';
+};
+
 export default function InventoryItemsPage() {
   const { can } = useAccess();
   const router = useRouter();
   const canManage = can('inventory.manage');
   const [rows, setRows] = useState<InventoryItem[]>([]);
   const [categories, setCategories] = useState<InventoryCategory[]>([]);
+  const [pending, setPending] = useState<Record<string, PendingReceiving>>({});
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<InventoryItem | null>(null);
@@ -52,12 +66,41 @@ export default function InventoryItemsPage() {
 
   const load = useCallback(async () => {
     try {
-      const [items, cats] = await Promise.all([
+      const [items, cats, receipts, receiptItems] = await Promise.all([
         supabase.from('inventory_items').select('*, category:inventory_categories(name)').order('name'),
         supabase.from('inventory_categories').select('*').eq('is_active', true).order('name'),
+        supabase.from('inventory_receipts').select('id, status').in('status', ['PENDING_INSPECTION', 'INSPECTED']),
+        supabase
+          .from('inventory_receipt_items')
+          .select('item_id, receipt_id, delivered_qty, accepted_qty, outcome'),
       ]);
       setRows((items.data || []) as unknown as InventoryItem[]);
       setCategories((cats.data || []) as unknown as InventoryCategory[]);
+
+      const stageByReceipt = new Map<string, string>();
+      for (const receipt of (receipts.data || []) as { id: string; status: string }[]) {
+        stageByReceipt.set(receipt.id, receipt.status);
+      }
+      const next: Record<string, PendingReceiving> = {};
+      for (const line of (receiptItems.data || []) as {
+        item_id: string;
+        receipt_id: string;
+        delivered_qty: number;
+        accepted_qty: number | null;
+        outcome: string | null;
+      }[]) {
+        const stage = stageByReceipt.get(line.receipt_id);
+        if (!stage) continue;
+        if (stage === 'INSPECTED' && (line.outcome === 'REJECTED' || Number(line.accepted_qty || 0) <= 0)) continue;
+        const qty = stage === 'INSPECTED' ? Number(line.accepted_qty || 0) : Number(line.delivered_qty || 0);
+        if (qty <= 0) continue;
+        const entry = next[line.item_id] || { qty: 0, stages: new Set<string>(), receiptId: null };
+        entry.qty += qty;
+        entry.stages.add(stage);
+        entry.receiptId = entry.receiptId && entry.receiptId !== line.receipt_id ? null : line.receipt_id;
+        next[line.item_id] = entry;
+      }
+      setPending(next);
     } catch (err) {
       console.error(err);
     } finally {
@@ -186,7 +229,7 @@ export default function InventoryItemsPage() {
     { label: 'Items', value: rows.length, icon: Package, color: 'primary' },
     { label: 'Active', value: rows.filter((r) => r.is_active).length, icon: CheckCircle, color: 'success' },
     { label: 'Inactive', value: rows.filter((r) => !r.is_active).length, icon: XCircle, color: 'destructive' },
-    { label: 'Avg Unit Cost', value: fmtMoney(rows.length ? rows.reduce((a, i) => a + Number(i.unit_cost), 0) / rows.length : 0), icon: DollarSign, color: 'info' },
+    { label: 'Pending Receiving', value: Object.keys(pending).length, icon: Package, color: Object.keys(pending).length ? 'warning' : 'info' },
   ];
 
   const columns: Column<InventoryItem>[] = [
@@ -206,6 +249,25 @@ export default function InventoryItemsPage() {
     { key: 'uom', label: 'UOM', render: (i) => i.uom },
     { key: 'unit_cost', label: 'Unit Cost', render: (i) => fmtMoney(i.unit_cost) },
     { key: 'reorder_level', label: 'Low / Over', render: (i) => `${fmtQty(i.reorder_level)} / ${i.max_stock_level != null ? fmtQty(i.max_stock_level) : '—'}` },
+    {
+      key: 'pending',
+      label: 'Pending Receiving',
+      searchable: false,
+      render: (i) => {
+        const entry = pending[i.id];
+        if (!entry) return <span className="text-xs text-muted-foreground">—</span>;
+        return (
+          <button
+            type="button"
+            className="text-left text-xs text-primary hover:underline"
+            onClick={(e) => { e.stopPropagation(); router.push('/inventory/receiving'); }}
+          >
+            <span className="font-medium">{fmtQty(entry.qty)} {i.uom}</span>
+            <span className="block text-muted-foreground">{pendingStatus(entry)}</span>
+          </button>
+        );
+      },
+    },
     {
       key: 'is_active',
       label: 'Status',

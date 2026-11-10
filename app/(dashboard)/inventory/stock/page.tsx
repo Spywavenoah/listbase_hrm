@@ -37,6 +37,7 @@ export default function StockPage() {
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [warehouseId, setWarehouseId] = useState('__all__');
+  const [stockStatus, setStockStatus] = useState('ALL');
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<StockItem | null>(null);
@@ -98,10 +99,13 @@ export default function StockPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const filtered = useMemo(
-    () => (warehouseId === '__all__' ? rows : rows.filter((r) => r.warehouse_id === warehouseId)),
-    [rows, warehouseId]
-  );
+  const filtered = useMemo(() => {
+    let result = warehouseId === '__all__' ? rows : rows.filter((r) => r.warehouse_id === warehouseId);
+    if (stockStatus === 'LOW') result = result.filter((r) => r._low);
+    else if (stockStatus === 'OVER') result = result.filter((r) => r._over);
+    else if (stockStatus === 'OK') result = result.filter((r) => !r._low && !r._over);
+    return result;
+  }, [rows, warehouseId, stockStatus]);
 
   const openEdit = (r: StockItem) => {
     setEditing(r);
@@ -224,6 +228,15 @@ export default function StockPage() {
         searchPlaceholder="Search stock..."
         toolbarActions={
           <>
+            <Select value={stockStatus} onValueChange={setStockStatus}>
+              <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All stock</SelectItem>
+                <SelectItem value="LOW">Low stock</SelectItem>
+                <SelectItem value="OVER">Over-stocked</SelectItem>
+                <SelectItem value="OK">Healthy</SelectItem>
+              </SelectContent>
+            </Select>
             <Select value={warehouseId} onValueChange={setWarehouseId}>
               <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
               <SelectContent>

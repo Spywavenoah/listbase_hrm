@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ModuleListPage, type Column, type SummaryCard } from '@/components/shared/module-list-page';
-import { CheckCircle, Clock, FileCheck2, PackageCheck, Upload } from 'lucide-react';
+import { CheckCircle, Clock, Download, FileCheck2, PackageCheck, Upload } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,19 +13,27 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
 import { useAccess } from '@/lib/access';
+import { downloadIssueReceiptPdf } from '@/lib/inventory/issue-receipt-pdf';
 import {
+  INVENTORY_DOCUMENT_ACCEPT,
+  INVENTORY_DOCUMENT_BUCKET,
   fmtDate,
   fmtQty,
+  inventoryDocumentError,
+  inventoryDocumentPath,
   type MaterialIssueReceipt,
   type MaterialIssueReceiptItem,
 } from '@/lib/inventory';
 
-const DOC_BUCKET = 'inventory-items';
+const DOC_BUCKET = INVENTORY_DOCUMENT_BUCKET;
 
 const statusClass = (receipt: MaterialIssueReceipt) =>
   receipt.acknowledged_at
     ? 'bg-success/10 text-success border-success/30'
     : 'bg-warning/10 text-warning border-warning/30';
+
+const employeeLabel = (row?: { first_name: string | null; last_name: string | null } | null) =>
+  row ? [row.first_name, row.last_name].filter(Boolean).join(' ') || '—' : '—';
 
 export default function MaterialIssueReceiptsPage() {
   const { can, employee } = useAccess();
@@ -40,6 +48,7 @@ export default function MaterialIssueReceiptsPage() {
   const [comment, setComment] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [working, setWorking] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -48,7 +57,7 @@ export default function MaterialIssueReceiptsPage() {
       const [hRes, lRes] = await Promise.all([
         supabase
           .from('material_issue_receipts')
-          .select('*, request:material_requests!material_issue_receipts_request_id_fkey(request_number, warehouse:inventory_warehouses(name))')
+          .select('*, issued_by_employee:employees!material_issue_receipts_issued_by_fkey(first_name,last_name), acknowledged_by_employee:employees!material_issue_receipts_acknowledged_by_fkey(first_name,last_name), request:material_requests!material_issue_receipts_request_id_fkey(request_number, warehouse:inventory_warehouses(name))')
           .order('issued_at', { ascending: false }),
         supabase
           .from('material_issue_receipt_items')
@@ -92,12 +101,15 @@ export default function MaterialIssueReceiptsPage() {
       toast.error('Choose the signed receipt file');
       return;
     }
+    if (signedCopy && file) {
+      const validation = inventoryDocumentError(file);
+      if (validation) { toast.error(validation); return; }
+    }
     setWorking(true);
     try {
       let documentUrl: string | null = detailRow.signed_document_url;
       if (signedCopy && file) {
-        const ext = (file.name.split('.').pop() || 'pdf').toLowerCase();
-        const path = `issue-receipts/${detailRow.id}/${Date.now()}.${ext}`;
+        const path = inventoryDocumentPath('issue-receipts', detailRow.id, file);
         const { error: uploadError } = await supabase.storage
           .from(DOC_BUCKET)
           .upload(path, file, { upsert: true, contentType: file.type });
@@ -119,6 +131,20 @@ export default function MaterialIssueReceiptsPage() {
       toast.error('Failed: ' + (err as Error).message);
     } finally {
       setWorking(false);
+    }
+  };
+
+  const downloadPdf = async (receipt: MaterialIssueReceipt) => {
+    setDownloading(true);
+    try {
+      await downloadIssueReceiptPdf({
+        ...receipt,
+        lines: receipt.id === detailRow?.id ? detailLines : linesByReceipt[receipt.id] || [],
+      });
+    } catch (err) {
+      toast.error('Failed to build PDF: ' + (err as Error).message);
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -166,9 +192,14 @@ export default function MaterialIssueReceiptsPage() {
         searchPlaceholder="Search receipts, requests or recipients..."
         onRowClick={(r) => setDetailId(r.id)}
         rowActions={(r) => (
-          canAcknowledge(r)
-            ? <Button size="sm" variant="outline" onClick={() => setDetailId(r.id)}><CheckCircle className="mr-1.5 h-4 w-4" /> Acknowledge</Button>
-            : <Button size="sm" variant="ghost" onClick={() => setDetailId(r.id)}>View</Button>
+          <div className="flex items-center gap-1">
+            <Button size="sm" variant="ghost" onClick={() => downloadPdf(r)} disabled={downloading} title="Download PDF">
+              <Download className="h-4 w-4" />
+            </Button>
+            {canAcknowledge(r)
+              ? <Button size="sm" variant="outline" onClick={() => setDetailId(r.id)}><CheckCircle className="mr-1.5 h-4 w-4" /> Acknowledge</Button>
+              : <Button size="sm" variant="ghost" onClick={() => setDetailId(r.id)}>View</Button>}
+          </div>
         )}
         emptyMessage="No issue receipts yet"
         emptyDescription="Issue an approved material request to create a receipt for acknowledgement."
@@ -192,12 +223,16 @@ export default function MaterialIssueReceiptsPage() {
                 <p>Request: <span className="font-medium">{detailRow.request?.request_number || '—'}</span></p>
                 <p>Warehouse: <span className="font-medium">{detailRow.request?.warehouse?.name || '—'}</span></p>
                 <p>Recipient: <span className="font-medium">{detailRow.recipient_name}</span></p>
+                <p>Issued by: <span className="font-medium">{employeeLabel(detailRow.issued_by_employee)}</span></p>
                 <p>Issued: <span className="font-medium">{fmtDate(detailRow.issued_at)}</span></p>
                 {detailRow.acknowledged_at && (
                   <p>Acknowledged: <span className="font-medium">{fmtDate(detailRow.acknowledged_at)}</span></p>
                 )}
                 {detailRow.acknowledgement_method && (
                   <p>Method: <span className="font-medium">{detailRow.acknowledgement_method === 'SIGNED_COPY' ? 'Signed copy' : 'Recipient confirmation'}</span></p>
+                )}
+                {detailRow.acknowledged_at && (
+                  <p>Acknowledged by: <span className="font-medium">{employeeLabel(detailRow.acknowledged_by_employee)}</span></p>
                 )}
               </div>
 
@@ -251,7 +286,7 @@ export default function MaterialIssueReceiptsPage() {
                         <input
                           ref={fileRef}
                           type="file"
-                          accept="application/pdf,image/png,image/jpeg"
+                          accept={INVENTORY_DOCUMENT_ACCEPT}
                           className="hidden"
                           onChange={(e) => setFile(e.target.files?.[0] || null)}
                         />
@@ -276,6 +311,11 @@ export default function MaterialIssueReceiptsPage() {
             </div>
           )}
           <DialogFooter>
+            {detailRow && (
+              <Button variant="outline" onClick={() => downloadPdf(detailRow)} disabled={downloading}>
+                <Download className="mr-1.5 h-4 w-4" /> {downloading ? 'Building...' : 'Download PDF'}
+              </Button>
+            )}
             {detailRow && canAcknowledge(detailRow) && (
               <Button onClick={acknowledge} disabled={working}>
                 <CheckCircle className="mr-1.5 h-4 w-4" /> {working ? 'Recording...' : 'Record Acknowledgement'}

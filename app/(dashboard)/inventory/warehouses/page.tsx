@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { ModuleListPage, type Column, type SummaryCard } from '@/components/shared/module-list-page';
-import { Warehouse as WarehouseIcon, CheckCircle, XCircle, MapPin } from 'lucide-react';
+import { Warehouse as WarehouseIcon, CheckCircle, Package, Layers } from 'lucide-react';
 import { supabase } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,7 +14,7 @@ import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
 import { useAccess } from '@/lib/access';
-import { WAREHOUSE_TYPES, type Warehouse } from '@/lib/inventory';
+import { WAREHOUSE_TYPES, fmtQty, type Warehouse } from '@/lib/inventory';
 
 const EMPTY = {
   code: '',
@@ -30,10 +30,18 @@ const EMPTY = {
   is_default: false,
 };
 
+interface WarehouseStockLite {
+  warehouse_id: string;
+  item_id: string;
+  quantity: number;
+  reserved_quantity: number;
+}
+
 export default function WarehousesPage() {
   const { can } = useAccess();
   const canManage = can('inventory.settings') || can('inventory.manage');
   const [rows, setRows] = useState<Warehouse[]>([]);
+  const [stock, setStock] = useState<WarehouseStockLite[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Warehouse | null>(null);
@@ -41,8 +49,12 @@ export default function WarehousesPage() {
 
   const load = useCallback(async () => {
     try {
-      const { data } = await supabase.from('inventory_warehouses').select('*').order('name');
-      setRows((data || []) as unknown as Warehouse[]);
+      const [wRes, sRes] = await Promise.all([
+        supabase.from('inventory_warehouses').select('*').order('name'),
+        supabase.from('inventory_stock').select('warehouse_id, item_id, quantity, reserved_quantity'),
+      ]);
+      setRows((wRes.data || []) as unknown as Warehouse[]);
+      setStock((sRes.data || []) as unknown as WarehouseStockLite[]);
     } catch (err) {
       console.error(err);
     } finally {
@@ -119,11 +131,23 @@ export default function WarehousesPage() {
     }
   };
 
+  const stockTotals = (warehouseId: string) => {
+    const positions = stock.filter((s) => s.warehouse_id === warehouseId);
+    return {
+      items: new Set(positions.map((s) => s.item_id)).size,
+      units: positions.reduce((sum, s) => sum + Number(s.quantity || 0), 0),
+      reserved: positions.reduce((sum, s) => sum + Number(s.reserved_quantity || 0), 0),
+    };
+  };
+
+  const totalItems = new Set(stock.map((s) => s.item_id)).size;
+  const totalUnits = stock.reduce((sum, s) => sum + Number(s.quantity || 0), 0);
+
   const summaryCards: SummaryCard[] = [
     { label: 'Warehouses', value: rows.length, icon: WarehouseIcon, color: 'primary' },
     { label: 'Active', value: rows.filter((r) => r.is_active).length, icon: CheckCircle, color: 'success' },
-    { label: 'Inactive', value: rows.filter((r) => !r.is_active).length, icon: XCircle, color: 'destructive' },
-    { label: 'Locations', value: new Set(rows.map((r) => r.city).filter(Boolean)).size, icon: MapPin, color: 'info' },
+    { label: 'Stock Items', value: totalItems, icon: Package, color: 'info' },
+    { label: 'Units On Hand', value: fmtQty(totalUnits), icon: Layers, color: 'primary' },
   ];
 
   const columns: Column<Warehouse>[] = [
@@ -137,6 +161,26 @@ export default function WarehousesPage() {
     { key: 'type', label: 'Type', render: (w) => WAREHOUSE_TYPES.find((t) => t.value === w.type)?.label || w.type },
     { key: 'city', label: 'Location', render: (w) => [w.city, w.state, w.country].filter(Boolean).join(', ') || '—' },
     { key: 'phone', label: 'Phone', render: (w) => w.phone || '—' },
+    {
+      key: 'items',
+      label: 'Stock Items',
+      searchable: false,
+      render: (w) => stockTotals(w.id).items,
+    },
+    {
+      key: 'stock',
+      label: 'On Hand',
+      searchable: false,
+      render: (w) => {
+        const totals = stockTotals(w.id);
+        return (
+          <div>
+            <p className="font-medium">{fmtQty(totals.units)}</p>
+            {totals.reserved > 0 && <p className="text-xs text-muted-foreground">{fmtQty(totals.reserved)} reserved</p>}
+          </div>
+        );
+      },
+    },
     {
       key: 'is_active',
       label: 'Status',
