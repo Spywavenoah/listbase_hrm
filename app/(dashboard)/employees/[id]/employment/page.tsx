@@ -18,6 +18,8 @@ import type { GradeLevel } from '@/lib/types';
 
 const STAFF_CATEGORIES = ['EXECUTIVE', 'MANAGEMENT', 'SENIOR_STAFF', 'JUNIOR_STAFF', 'CONTRACT', 'INTERN', 'ADVISOR'];
 const CONTRACT_TYPES = ['PERMANENT', 'CONTRACT', 'PROBATION', 'CASUAL', 'INTERN'];
+// Radix Select forbids an empty-string item value, so "no facility" uses a sentinel.
+const NONE_LOCATION = '__none__';
 
 export default function EmploymentPage() {
   const params = useParams();
@@ -57,7 +59,7 @@ export default function EmploymentPage() {
 
   const load = useCallback(async () => {
     try {
-      const [empRes, deptRes, posRes, mgrRes, gradeRes, shiftRes, customRes, facRes] = await Promise.all([
+      const [empRes, deptRes, posRes, mgrRes, gradeRes, shiftRes, facRes, customRes] = await Promise.all([
         supabase.from('employees').select('*').eq('id', id).maybeSingle(),
         supabase.from('departments').select('id, name').eq('is_active', true),
         supabase.from('positions').select('id, title'),
@@ -301,10 +303,13 @@ export default function EmploymentPage() {
         <div className="space-y-1.5">
           <Label>Location / Facility</Label>
           <p className="text-xs text-muted-foreground">Determines the geofence used for clock-in/out when not assigned to an active project.</p>
-          <Select value={form.location_id} onValueChange={(v) => setForm({ ...form, location_id: v })}>
-            <SelectTrigger><SelectValue placeholder="Select facility" /></SelectTrigger>
+          <Select
+            value={form.location_id || NONE_LOCATION}
+            onValueChange={(v) => setForm({ ...form, location_id: v === NONE_LOCATION ? '' : v })}
+          >
+            <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem key="" value="">None (use project geofence only)</SelectItem>
+              <SelectItem value={NONE_LOCATION}>None (use project geofence only)</SelectItem>
               {facilities.map((f) => (
                 <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>
               ))}
